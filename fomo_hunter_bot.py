@@ -29,10 +29,12 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 recently_alerted = {} # لتخزين العملات التي تم التنبيه عنها مؤخراً
 
 def get_usdt_pairs_from_mexc():
-    """جلب جميع أزواج التداول التي تنتهي بـ USDT من منصة MEXC."""
+    """
+    جلب جميع أزواج التداول التي تنتهي بـ USDT من منصة MEXC.
+    **التعديل الجديد: استخدام نقطة نهاية Ticker API لتجنب الحظر.**
+    """
     try:
-        url = f"{MEXC_API_BASE_URL}/api/v3/exchangeInfo"
-        # **التعديل الجديد: إضافة هيدر المتصفح لتجنب الحظر**
+        url = f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
@@ -40,19 +42,19 @@ def get_usdt_pairs_from_mexc():
         response.raise_for_status()
         data = response.json()
         
-        # تحسين التحقق من البيانات المستلمة
-        if not data or 'symbols' not in data or not data['symbols']:
-            logging.warning("API MEXC استجابت بنجاح ولكنها لم ترجع أي بيانات للعملات. قد تكون هناك مشكلة مؤقتة في المنصة أو حظر على IP.")
+        if not isinstance(data, list) or not data:
+            logging.warning("API Ticker 24hr استجابت بنجاح ولكنها لم ترجع أي بيانات للعملات.")
             return []
             
+        # لا نحتاج لفلترة الحالة 'ENABLED' هنا لأن هذا الـ endpoint يرجع الأزواج النشطة فقط
         usdt_pairs = [
-            s['symbol'] for s in data['symbols'] 
-            if s['symbol'].endswith('USDT') and s['status'] == 'ENABLED'
+            s['symbol'] for s in data 
+            if s['symbol'].endswith('USDT')
         ]
-        logging.info(f"تم العثور على {len(usdt_pairs)} زوج تداول مقابل USDT.")
+        logging.info(f"تم العثور على {len(usdt_pairs)} زوج تداول مقابل USDT عبر Ticker API.")
         return usdt_pairs
     except requests.exceptions.RequestException as e:
-        logging.error(f"خطأ في جلب قائمة العملات من MEXC: {e}")
+        logging.error(f"خطأ في جلب قائمة العملات من MEXC عبر Ticker API: {e}")
         return []
 
 def analyze_symbol(symbol):
@@ -71,7 +73,8 @@ def analyze_symbol(symbol):
 
         if len(daily_data) < 2: return None
 
-        previous_day_volume = float(daily_data[0][7])
+        # MEXC ترجع حجم التداول كـ "quote asset volume" في klines, وهو ما نحتاجه (USDT volume)
+        previous_day_volume = float(daily_data[0][7]) 
         current_day_volume = float(daily_data[1][7])
 
         if current_day_volume < MIN_USDT_VOLUME: return None
@@ -139,7 +142,6 @@ def main_job():
     """الوظيفة الرئيسية التي يتم تشغيلها بشكل دوري."""
     logging.info("===== بدء جولة فحص جديدة =====")
     
-    # **التعديل الجديد: إصلاح تحذير utcnow()**
     now = datetime.now(UTC)
     for symbol, timestamp in list(recently_alerted.items()):
         if now - timestamp > timedelta(hours=COOLDOWN_PERIOD_HOURS):
