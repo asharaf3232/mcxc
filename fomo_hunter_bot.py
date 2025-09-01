@@ -27,6 +27,11 @@ RUN_PATTERN_SCAN_EVERY_HOURS = 1
 PATTERN_SIGHTING_THRESHOLD = 3
 PATTERN_LOOKBACK_DAYS = 7
 
+# --- [جديد] إعدادات صياد الجواهر ---
+GEM_MAX_PRICE = 0.10          # أقصى سعر للعملة لتعتبر "جوهرة"
+GEM_MIN_VOLUME = 50000        # أقل حجم تداول مقبول
+GEM_MAX_VOLUME = 2000000      # أقصى حجم تداول (لتجنب العملات المشهورة)
+
 # --- إعدادات متقدمة ---
 MEXC_API_BASE_URL = "https://api.mexc.com"
 COOLDOWN_PERIOD_HOURS = 2
@@ -44,12 +49,12 @@ recently_alerted_pattern = {}
 # الوظائف التفاعلية (الأزرار والأوامر)
 # =============================================================================
 def build_menu():
-    """Builds the main menu keyboard with the new report button."""
+    """Builds the main menu keyboard with the new Gem Hunter button."""
     keyboard = [
         [InlineKeyboardButton("📈 الأكثر ارتفاعاً", callback_data='top_gainers'),
          InlineKeyboardButton("📉 الأكثر انخفاضاً", callback_data='top_losers')],
-        [InlineKeyboardButton("💰 الأعلى سيولة (فوليوم)", callback_data='top_volume')],
-        [InlineKeyboardButton("📊 تقرير الأداء اليومي", callback_data='daily_report')] # [جديد]
+        [InlineKeyboardButton("💰 الأعلى سيولة (عام)", callback_data='top_volume')],
+        [InlineKeyboardButton("💎 تقرير صياد الجواهر", callback_data='gem_hunter_report')] # [تغيير]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -68,15 +73,15 @@ def button_handler(update, context):
     query.answer()
     context.bot.send_message(chat_id=query.message.chat_id, text=f"🔍 جارِ تنفيذ طلبك...")
     
-    # [تحديث] إضافة معالج للزر الجديد
+    # [تحديث] تغيير معالج الزر
     if query.data == 'top_gainers':
         get_top_10_gainers(context, query.message.chat_id)
     elif query.data == 'top_losers':
         get_top_10_losers(context, query.message.chat_id)
     elif query.data == 'top_volume':
         get_top_10_volume(context, query.message.chat_id)
-    elif query.data == 'daily_report':
-        send_daily_report(context, query.message.chat_id)
+    elif query.data == 'gem_hunter_report':
+        send_gem_hunter_report(context, query.message.chat_id)
 
 def get_market_data():
     """Helper function to get all market data from MEXC."""
@@ -91,40 +96,55 @@ def format_price(price_str):
     price_float = float(price_str)
     return f"{price_float:.8f}".rstrip('0').rstrip('.')
 
-# [جديد] الدالة الخاصة بإنشاء التقرير اليومي
-def send_daily_report(context, chat_id):
-    """Creates and sends a daily performance report based on top volume."""
+# [جديد] الدالة الخاصة بتقرير صياد الجواهر
+def send_gem_hunter_report(context, chat_id):
+    """Filters and sends a report of potential 'gem' coins."""
     try:
         data = get_market_data()
-        usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
-        for pair in usdt_pairs:
-            pair['quoteVolume_float'] = float(pair['quoteVolume'])
         
-        # فرز العملات حسب حجم التداول
-        sorted_by_volume = sorted(usdt_pairs, key=lambda x: x['quoteVolume_float'], reverse=True)
-        top_10 = sorted_by_volume[:10]
+        potential_gems = []
+        for pair in data:
+            if not pair['symbol'].endswith('USDT'): continue
+
+            try:
+                price = float(pair['lastPrice'])
+                volume = float(pair['quoteVolume'])
+                change = float(pair['priceChangePercent']) * 100
+
+                # تطبيق الفلاتر الذكية
+                if (price <= GEM_MAX_PRICE and
+                    GEM_MIN_VOLUME <= volume <= GEM_MAX_VOLUME and
+                    change > 0):
+                    potential_gems.append(pair)
+            except (ValueError, TypeError):
+                continue # تجاهل أي عملة ببيانات غير صالحة
+
+        if not potential_gems:
+            context.bot.send_message(chat_id=chat_id, text="💎 لم يتم العثور على عملات تطابق معايير 'الجواهر' حالياً. حاول مرة أخرى لاحقاً.")
+            return
+
+        # فرز الجواهر المحتملة حسب نسبة الارتفاع
+        sorted_gems = sorted(potential_gems, key=lambda x: float(x['priceChangePercent']), reverse=True)
         
-        today_date = datetime.now().strftime('%d.%m')
+        message = f"💎 **تقرير صياد الجواهر - {datetime.now().strftime('%d.%m')}** 💎\n\n"
+        message += "قائمة عملات واعدة ذات سعر منخفض وحجم تداول متزايد:\n\n"
         
-        # بناء الرسالة بنفس الشكل المطلوب
-        message = f"📊 **تقرير MEXC اليومي {today_date}!** 🔥💰\n\n"
-        message += "**الأفضل أداءً اليوم (حسب حجم التداول):**\n"
-        
-        emoji_map = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟"}
-        
-        for i, pair in enumerate(top_10):
-            rank = i + 1
-            symbol = pair['symbol']
-            volume = pair['quoteVolume_float']
-            message += f"{emoji_map.get(rank, f'{rank}.')} ${symbol}: `${volume:,.0f}`\n"
+        for i, pair in enumerate(sorted_gems[:10]):
+            symbol = pair['symbol'].replace('USDT', '')
+            price = format_price(pair['lastPrice'])
+            change_percent = float(pair['priceChangePercent']) * 100
+            volume = float(pair['quoteVolume'])
             
-        message += "\n*يتم الترتيب بناءً على إجمالي حجم التداول بالـ USDT خلال آخر 24 ساعة.*"
-        
+            message += f"**{i+1}. ${symbol}**\n"
+            message += f"   - السعر: `${price}`\n"
+            message += f"   - الارتفاع: `%{change_percent:+.2f}`\n"
+            message += f"   - السيولة: `${volume:,.0f}`\n\n"
+            
         context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
-        logger.error(f"Error in send_daily_report: {e}")
-        context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء إنشاء التقرير اليومي.")
+        logger.error(f"Error in send_gem_hunter_report: {e}")
+        context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء البحث عن الجواهر.")
 
 # ... (بقية دوال الأزرار تبقى كما هي)
 def get_top_10_gainers(context, chat_id):
