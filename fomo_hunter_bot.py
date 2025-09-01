@@ -56,7 +56,8 @@ def get_top_10_gainers(update, context):
         usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
         
         for pair in usdt_pairs:
-            pair['priceChangePercent_float'] = float(pair['priceChangePercent'])
+            # *** FIX: Convert the ratio from the API (e.g., 0.0711) to a proper percentage (7.11) ***
+            pair['priceChangePercent_float'] = float(pair['priceChangePercent']) * 100
 
         sorted_pairs = sorted(usdt_pairs, key=lambda x: x['priceChangePercent_float'], reverse=True)
         
