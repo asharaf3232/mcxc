@@ -15,9 +15,9 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
 # --- معايير التحليل (يمكنك تعديل هذه القيم لتناسب استراتيجيتك) ---
 VOLUME_SPIKE_MULTIPLIER = 10
-PRICE_ACTION_CANDLES = 6
-GREEN_CANDLE_THRESHOLD = 4
 MIN_USDT_VOLUME = 500000
+# [جديد] الشرط الجديد: نبحث عن صعود بنسبة 30% على الأقل في آخر 4 ساعات
+PRICE_VELOCITY_THRESHOLD = 30.0 
 RUN_EVERY_MINUTES = 15
 
 # --- إعدادات متقدمة ---
@@ -35,17 +35,16 @@ recently_alerted = {}
 # =============================================================================
 def start_command(update, context):
     """Handler for /start command."""
-    welcome_message = "✅ **أهلاً بك في بوت صياد الفومو!**\n\n"
-    welcome_message += "يقوم هذا البوت بمهمتين:\n"
-    welcome_message += "1- مراقبة السوق تلقائياً وإرسال تنبيهات فومو.\n"
-    welcome_message += "2- تزويدك بمعلومات عن السوق عند الطلب.\n\n"
-    welcome_message += "استخدم الأمر /top10 لمعرفة أكثر 10 عملات ارتفاعاً الآن."
+    welcome_message = "✅ **أهلاً بك في بوت صياد الفومو (النسخة المطورة)!**\n\n"
+    welcome_message += "الأوامر المتاحة:\n"
+    welcome_message += "📈 /top10 - لعرض أكثر 10 عملات ارتفاعاً.\n"
+    welcome_message += "💰 /topvolume - لعرض أكثر 10 عملات سيولة (فوليوم)."
     update.message.reply_text(welcome_message, parse_mode=ParseMode.MARKDOWN)
 
 def get_top_10_gainers(update, context):
     """Fetches and sends the top 10 gaining coins from MEXC."""
     try:
-        update.message.reply_text("🔍 جارِ البحث عن أكثر 10 عملات ارتفاعاً، لحظات من فضلك...")
+        update.message.reply_text("🔍 جارِ البحث عن أكثر 10 عملات **ارتفاعاً**، لحظات...")
         
         url = f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -56,27 +55,60 @@ def get_top_10_gainers(update, context):
         usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
         
         for pair in usdt_pairs:
-            # *** FIX: Convert the ratio from the API (e.g., 0.0711) to a proper percentage (7.11) ***
             pair['priceChangePercent_float'] = float(pair['priceChangePercent']) * 100
 
         sorted_pairs = sorted(usdt_pairs, key=lambda x: x['priceChangePercent_float'], reverse=True)
-        
         top_10 = sorted_pairs[:10]
 
-        message = "🔥 **أكثر 10 عملات ارتفاعاً في آخر 24 ساعة على MEXC** 🔥\n\n"
+        message = "🔥 **أكثر 10 عملات ارتفاعاً في آخر 24 ساعة** 🔥\n\n"
         for i, pair in enumerate(top_10):
             symbol = pair['symbol'].replace('USDT', '')
             change = pair['priceChangePercent_float']
             price = f"{float(pair['lastPrice']):.8f}".rstrip('0').rstrip('.')
             message += f"{i+1}. **${symbol}**\n"
-            message += f"   - نسبة الارتفاع: `%{change:.2f}`\n"
+            message += f"   - نسبة الارتفاع: `%{change:+.2f}`\n"
             message += f"   - السعر الحالي: `${price}`\n\n"
         
         update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
         logger.error(f"Error in /top10 command: {e}")
-        update.message.reply_text("حدث خطأ أثناء جلب البيانات. يرجى المحاولة مرة أخرى لاحقاً.")
+        update.message.reply_text("حدث خطأ أثناء جلب البيانات.")
+
+def get_top_10_volume(update, context):
+    """[جديد] Fetches and sends the top 10 coins by volume from MEXC."""
+    try:
+        update.message.reply_text("🔍 جارِ البحث عن أكثر 10 عملات **سيولة (فوليوم)**، لحظات...")
+        
+        url = f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+
+        usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
+        
+        for pair in usdt_pairs:
+            pair['quoteVolume_float'] = float(pair['quoteVolume'])
+
+        sorted_pairs = sorted(usdt_pairs, key=lambda x: x['quoteVolume_float'], reverse=True)
+        top_10 = sorted_pairs[:10]
+
+        message = "💰 **أكثر 10 عملات سيولة (فوليوم) في آخر 24 ساعة** 💰\n\n"
+        for i, pair in enumerate(top_10):
+            symbol = pair['symbol'].replace('USDT', '')
+            volume = pair['quoteVolume_float']
+            price = f"{float(pair['lastPrice']):.8f}".rstrip('0').rstrip('.')
+            message += f"{i+1}. **${symbol}**\n"
+            message += f"   - حجم التداول: `${volume:,.0f}`\n"
+            message += f"   - السعر الحالي: `${price}`\n\n"
+        
+        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error in /topvolume command: {e}")
+        update.message.reply_text("حدث خطأ أثناء جلب البيانات.")
+
 
 # =============================================================================
 # وظائف صياد الفومو (تعمل في الخلفية)
@@ -84,7 +116,7 @@ def get_top_10_gainers(update, context):
 def send_startup_message():
     """Sends a confirmation message when the bot starts."""
     try:
-        message = "✅ **بوت صياد الفومو متصل الآن!**\n\nسأقوم بمراقبة السوق وإرسال التنبيهات عند العثور على فرصة محتملة."
+        message = "✅ **بوت صياد الفومو (النسخة المطورة) متصل الآن!**"
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
         logger.info("تم إرسال رسالة بدء التشغيل بنجاح.")
     except Exception as e:
@@ -106,7 +138,9 @@ def get_usdt_pairs_for_fomo():
         return []
 
 def analyze_symbol(symbol):
-    """Analyzes a single symbol for fomo conditions."""
+    """
+    [النسخة المطورة] تحليل عملة واحدة بناءً على انفجار حجم التداول وقوة الصعود السعري.
+    """
     try:
         klines_url = f"{MEXC_API_BASE_URL}/api/v3/klines"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -117,40 +151,49 @@ def analyze_symbol(symbol):
         daily_data = daily_res.json()
 
         if len(daily_data) < 2: return None
-        
+
         previous_day_volume = float(daily_data[0][7])
         current_day_volume = float(daily_data[1][7])
 
         if current_day_volume < MIN_USDT_VOLUME: return None
 
-        if previous_day_volume == 0:
-            volume_increase_percent = float('inf')
-        else:
-            volume_increase_percent = ((current_day_volume - previous_day_volume) / previous_day_volume) * 100
+        is_volume_spike = current_day_volume > (previous_day_volume * VOLUME_SPIKE_MULTIPLIER)
+        if not is_volume_spike: return None
 
-        if not current_day_volume > (previous_day_volume * VOLUME_SPIKE_MULTIPLIER): return None
-
-        hourly_params = {'symbol': symbol, 'interval': '1h', 'limit': PRICE_ACTION_CANDLES}
+        hourly_params = {'symbol': symbol, 'interval': '1h', 'limit': 4}
         hourly_res = requests.get(klines_url, params=hourly_params, headers=headers, timeout=10)
         hourly_res.raise_for_status()
         hourly_data = hourly_res.json()
+
+        if len(hourly_data) < 4: return None
+
+        initial_price = float(hourly_data[0][1])
+        latest_high_price = float(hourly_data[-1][2])
         
-        if len(hourly_data) < PRICE_ACTION_CANDLES: return None
-        green_candles = sum(1 for c in hourly_data if float(c[4]) > float(c[1]))
-        if not green_candles >= GREEN_CANDLE_THRESHOLD: return None
+        if initial_price == 0: return None
+        price_increase_percent = ((latest_high_price - initial_price) / initial_price) * 100
+        
+        is_strong_pump = price_increase_percent >= PRICE_VELOCITY_THRESHOLD
+        if not is_strong_pump: return None
 
         ticker_url = f"{MEXC_API_BASE_URL}/api/v3/ticker/price"
         price_res = requests.get(ticker_url, params={'symbol': symbol}, headers=headers, timeout=10)
         price_res.raise_for_status()
         current_price = float(price_res.json()['price'])
+        
+        volume_increase_percent = ((current_day_volume - previous_day_volume) / previous_day_volume) * 100 if previous_day_volume > 0 else float('inf')
 
         return {
             'symbol': symbol,
             'volume_increase': f"+{volume_increase_percent:,.2f}%",
-            'price_pattern': f"{green_candles}/{PRICE_ACTION_CANDLES} شموع خضراء",
+            'price_pattern': f"صعود بنسبة +{price_increase_percent:,.2f}% في آخر 4 ساعات",
             'current_price': f"{current_price:.8f}".rstrip('0').rstrip('.')
         }
-    except Exception:
+        
+    except requests.exceptions.RequestException:
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error analyzing {symbol}: {e}")
         return None
 
 def send_fomo_alert(alert_data):
@@ -168,10 +211,10 @@ def fomo_hunter_job():
             del recently_alerted[symbol]
     
     symbols_to_check = get_usdt_pairs_for_fomo()
-    if not symbols_to_check:
-        return
+    if not symbols_to_check: return
 
-    for symbol in symbols_to_check:
+    for i, symbol in enumerate(symbols_to_check):
+        if (i + 1) % 200 == 0: logger.info(f"Fomo scan progress: {i+1}/{len(symbols_to_check)}")
         if symbol in recently_alerted: continue
         alert_data = analyze_symbol(symbol)
         if alert_data:
@@ -186,7 +229,7 @@ def fomo_hunter_job():
 def run_scheduler():
     """Runs the scheduled jobs in a background thread."""
     logger.info("Scheduler thread started. Running first fomo scan...")
-    fomo_hunter_job()  # Run the job once immediately
+    fomo_hunter_job()
     
     schedule.every(RUN_EVERY_MINUTES).minutes.do(fomo_hunter_job)
     while True:
@@ -196,28 +239,25 @@ def run_scheduler():
 def main():
     """Starts the bot and the background thread."""
     if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN or 'YOUR_TELEGRAM' in TELEGRAM_CHAT_ID:
-        logger.error("خطأ فادح: لم يتم تعيين توكن التليجرام أو معرف المحادثة.")
+        logger.error("FATAL ERROR: Bot token or chat ID are not set.")
         return
 
-    # إعداد الـ Updater لاستقبال الأوامر
     updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
     # إضافة الأوامر التي يرد عليها البوت
     dp.add_handler(CommandHandler("start", start_command))
     dp.add_handler(CommandHandler("top10", get_top_10_gainers))
+    dp.add_handler(CommandHandler("topvolume", get_top_10_volume)) # [جديد]
 
-    # إرسال رسالة بدء التشغيل
     send_startup_message()
 
-    # تشغيل مهمة صياد الفومو في الخلفية (في عامل منفصل)
     scheduler_thread = threading.Thread(target=run_scheduler)
     scheduler_thread.daemon = True
     scheduler_thread.start()
     
-    # بدء استقبال الرسائل من تليجرام (في العامل الرئيسي)
     updater.start_polling()
-    logger.info("البوت بدأ الآن في استقبال الأوامر...")
+    logger.info("Bot is now polling for commands...")
     updater.idle()
 
 if __name__ == '__main__':
