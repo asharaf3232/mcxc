@@ -27,10 +27,10 @@ RUN_PATTERN_SCAN_EVERY_HOURS = 1
 PATTERN_SIGHTING_THRESHOLD = 3
 PATTERN_LOOKBACK_DAYS = 7
 
-# --- [جديد] إعدادات صياد الجواهر ---
-GEM_MAX_PRICE = 0.10          # أقصى سعر للعملة لتعتبر "جوهرة"
-GEM_MIN_VOLUME = 50000        # أقل حجم تداول مقبول
-GEM_MAX_VOLUME = 2000000      # أقصى حجم تداول (لتجنب العملات المشهورة)
+# --- إعدادات صياد الجواهر ---
+GEM_MAX_PRICE = 0.10
+GEM_MIN_VOLUME = 50000
+GEM_MAX_VOLUME = 2000000
 
 # --- إعدادات متقدمة ---
 MEXC_API_BASE_URL = "https://api.mexc.com"
@@ -49,12 +49,11 @@ recently_alerted_pattern = {}
 # الوظائف التفاعلية (الأزرار والأوامر)
 # =============================================================================
 def build_menu():
-    """Builds the main menu keyboard with the new Gem Hunter button."""
     keyboard = [
         [InlineKeyboardButton("📈 الأكثر ارتفاعاً", callback_data='top_gainers'),
          InlineKeyboardButton("📉 الأكثر انخفاضاً", callback_data='top_losers')],
         [InlineKeyboardButton("💰 الأعلى سيولة (عام)", callback_data='top_volume')],
-        [InlineKeyboardButton("💎 تقرير صياد الجواهر", callback_data='gem_hunter_report')] # [تغيير]
+        [InlineKeyboardButton("💎 تقرير صياد الجواهر", callback_data='gem_hunter_report')]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -68,85 +67,42 @@ def start_command(update, context):
     update.message.reply_text(welcome_message, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
 
 def button_handler(update, context):
-    """Handles all button presses."""
-    query = update.callback_query
-    query.answer()
+    query = update.callback_query; query.answer()
     context.bot.send_message(chat_id=query.message.chat_id, text=f"🔍 جارِ تنفيذ طلبك...")
-    
-    # [تحديث] تغيير معالج الزر
-    if query.data == 'top_gainers':
-        get_top_10_gainers(context, query.message.chat_id)
-    elif query.data == 'top_losers':
-        get_top_10_losers(context, query.message.chat_id)
-    elif query.data == 'top_volume':
-        get_top_10_volume(context, query.message.chat_id)
-    elif query.data == 'gem_hunter_report':
-        send_gem_hunter_report(context, query.message.chat_id)
+    if query.data == 'top_gainers': get_top_10_gainers(context, query.message.chat_id)
+    elif query.data == 'top_losers': get_top_10_losers(context, query.message.chat_id)
+    elif query.data == 'top_volume': get_top_10_volume(context, query.message.chat_id)
+    elif query.data == 'gem_hunter_report': send_gem_hunter_report(context, query.message.chat_id)
 
 def get_market_data():
-    """Helper function to get all market data from MEXC."""
-    url = f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    response = requests.get(url, headers=headers, timeout=15)
-    response.raise_for_status()
+    url = f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr"; headers = {'User-Agent': 'Mozilla/5.0'}
+    response = requests.get(url, headers=headers, timeout=15); response.raise_for_status()
     return response.json()
 
 def format_price(price_str):
-    """Helper to format price strings cleanly."""
-    price_float = float(price_str)
-    return f"{price_float:.8f}".rstrip('0').rstrip('.')
+    price_float = float(price_str); return f"{price_float:.8f}".rstrip('0').rstrip('.')
 
-# [جديد] الدالة الخاصة بتقرير صياد الجواهر
 def send_gem_hunter_report(context, chat_id):
-    """Filters and sends a report of potential 'gem' coins."""
     try:
-        data = get_market_data()
-        
-        potential_gems = []
+        data = get_market_data(); potential_gems = []
         for pair in data:
             if not pair['symbol'].endswith('USDT'): continue
-
             try:
-                price = float(pair['lastPrice'])
-                volume = float(pair['quoteVolume'])
-                change = float(pair['priceChangePercent']) * 100
-
-                # تطبيق الفلاتر الذكية
-                if (price <= GEM_MAX_PRICE and
-                    GEM_MIN_VOLUME <= volume <= GEM_MAX_VOLUME and
-                    change > 0):
+                price = float(pair['lastPrice']); volume = float(pair['quoteVolume']); change = float(pair['priceChangePercent']) * 100
+                if (price <= GEM_MAX_PRICE and GEM_MIN_VOLUME <= volume <= GEM_MAX_VOLUME and change > 0):
                     potential_gems.append(pair)
-            except (ValueError, TypeError):
-                continue # تجاهل أي عملة ببيانات غير صالحة
-
+            except (ValueError, TypeError): continue
         if not potential_gems:
-            context.bot.send_message(chat_id=chat_id, text="💎 لم يتم العثور على عملات تطابق معايير 'الجواهر' حالياً. حاول مرة أخرى لاحقاً.")
-            return
-
-        # فرز الجواهر المحتملة حسب نسبة الارتفاع
+            context.bot.send_message(chat_id=chat_id, text="💎 لم يتم العثور على عملات تطابق معايير 'الجواهر' حالياً."); return
         sorted_gems = sorted(potential_gems, key=lambda x: float(x['priceChangePercent']), reverse=True)
-        
-        message = f"💎 **تقرير صياد الجواهر - {datetime.now().strftime('%d.%m')}** 💎\n\n"
-        message += "قائمة عملات واعدة ذات سعر منخفض وحجم تداول متزايد:\n\n"
-        
+        message = f"💎 **تقرير صياد الجواهر - {datetime.now().strftime('%d.%m')}** 💎\n\nقائمة عملات واعدة ذات سعر منخفض وحجم تداول متزايد:\n\n"
         for i, pair in enumerate(sorted_gems[:10]):
-            symbol = pair['symbol'].replace('USDT', '')
-            price = format_price(pair['lastPrice'])
-            change_percent = float(pair['priceChangePercent']) * 100
-            volume = float(pair['quoteVolume'])
-            
-            message += f"**{i+1}. ${symbol}**\n"
-            message += f"   - السعر: `${price}`\n"
-            message += f"   - الارتفاع: `%{change_percent:+.2f}`\n"
-            message += f"   - السيولة: `${volume:,.0f}`\n\n"
-            
+            symbol = pair['symbol'].replace('USDT', ''); price = format_price(pair['lastPrice']); change_percent = float(pair['priceChangePercent']) * 100; volume = float(pair['quoteVolume'])
+            message += f"**{i+1}. ${symbol}**\n   - السعر: `${price}`\n   - الارتفاع: `%{change_percent:+.2f}`\n   - السيولة: `${volume:,.0f}`\n\n"
         context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
-
     except Exception as e:
-        logger.error(f"Error in send_gem_hunter_report: {e}")
-        context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء البحث عن الجواهر.")
+        logger.error(f"Error in send_gem_hunter_report: {e}"); context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء البحث عن الجواهر.")
 
-# ... (بقية دوال الأزرار تبقى كما هي)
 def get_top_10_gainers(context, chat_id):
     try:
         data = get_market_data(); usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
@@ -157,6 +113,7 @@ def get_top_10_gainers(context, chat_id):
             message += f"{i+1}. **${pair['symbol'].replace('USDT', '')}**\n   - نسبة الارتفاع: `%{pair['priceChangePercent_float']:+.2f}`\n   - السعر الحالي: `${format_price(pair['lastPrice'])}`\n\n"
         context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
     except Exception as e: logger.error(f"Error in get_top_10_gainers: {e}"); context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء جلب البيانات.")
+
 def get_top_10_losers(context, chat_id):
     try:
         data = get_market_data(); usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
@@ -167,6 +124,7 @@ def get_top_10_losers(context, chat_id):
             message += f"{i+1}. **${pair['symbol'].replace('USDT', '')}**\n   - نسبة الانخفاض: `%{pair['priceChangePercent_float']:+.2f}`\n   - السعر الحالي: `${format_price(pair['lastPrice'])}`\n\n"
         context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
     except Exception as e: logger.error(f"Error in get_top_10_losers: {e}"); context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء جلب البيانات.")
+
 def get_top_10_volume(context, chat_id):
     try:
         data = get_market_data(); usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
@@ -179,8 +137,32 @@ def get_top_10_volume(context, chat_id):
     except Exception as e: logger.error(f"Error in get_top_10_volume: {e}"); context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء جلب البيانات.")
 
 # =============================================================================
-# المهام الآلية (تعمل في الخلفية - لا تغيير هنا)
+# المهام الآلية (تعمل في الخلفية)
 # =============================================================================
+def new_listings_sniper_job():
+    """
+    [نسخة محدثة] تستخدم get_market_data() التي تعمل بشكل موثوق.
+    """
+    global known_symbols
+    logger.info("Sniper: Checking for new listings...")
+    try:
+        current_symbols = {s['symbol'] for s in get_market_data() if s['symbol'].endswith('USDT')}
+        if not known_symbols:
+            known_symbols = current_symbols
+            logger.info(f"Sniper: Initialized with {len(known_symbols)} symbols.")
+            return
+        
+        newly_listed = current_symbols - known_symbols
+        if newly_listed:
+            for symbol in newly_listed:
+                logger.info(f"Sniper: NEW LISTING DETECTED: {symbol}")
+                message = f"🎯 **تنبيه قناص: إدراج جديد!** 🎯\n\nتم للتو إدراج عملة جديدة على منصة MEXC:\n\n**العملة:** `${symbol}`\n\n*(مخاطر عالية! قم ببحثك بسرعة فائقة.)*"
+                bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+            known_symbols.update(newly_listed)
+    except Exception as e:
+        logger.error(f"Sniper: Error checking for new listings: {e}")
+
+# (بقية المهام الآلية تبقى كما هي)
 def pattern_hunter_job():
     global pattern_tracker, recently_alerted_pattern; logger.info("Pattern Hunter: Starting scan...")
     now = datetime.now(UTC)
@@ -205,21 +187,6 @@ def pattern_hunter_job():
                 bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
                 recently_alerted_pattern[symbol] = now
     except Exception as e: logger.error(f"Pattern Hunter: Error during scan: {e}")
-def new_listings_sniper_job():
-    global known_symbols; logger.info("Sniper: Checking for new listings...")
-    try:
-        url = f"{MEXC_API_BASE_URL}/api/v3/exchangeInfo"; headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=15); response.raise_for_status()
-        current_symbols = {s['symbol'] for s in response.json()['symbols'] if s['symbol'].endswith('USDT') and s['status'] == 'ENABLED'}
-        if not known_symbols: known_symbols = current_symbols; logger.info(f"Sniper: Initialized with {len(known_symbols)} symbols."); return
-        newly_listed = current_symbols - known_symbols
-        if newly_listed:
-            for symbol in newly_listed:
-                logger.info(f"Sniper: NEW LISTING DETECTED: {symbol}")
-                message = f"🎯 **تنبيه قناص: إدراج جديد!** 🎯\n\nتم للتو إدراج عملة جديدة على منصة MEXC:\n\n**العملة:** `${symbol}`\n\n*(مخاطر عالية! قم ببحثك بسرعة فائقة.)*"
-                bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
-            known_symbols.update(newly_listed)
-    except Exception as e: logger.error(f"Sniper: Error checking for new listings: {e}")
 def fomo_hunter_job():
     logger.info("===== Fomo Hunter: Starting Scan ====="); now = datetime.now(UTC)
     for symbol, timestamp in list(recently_alerted_fomo.items()):
