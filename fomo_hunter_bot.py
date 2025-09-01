@@ -4,206 +4,221 @@ import requests
 import time
 import schedule
 import logging
-from telegram import Bot
+import threading
+from telegram import Bot, ParseMode
+from telegram.ext import Updater, CommandHandler
 from datetime import datetime, timedelta, UTC
 
 # --- الإعدادات الرئيسية ---
-# سيتم جلب هذه المتغيرات من منصة النشر
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN') 
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
 # --- معايير التحليل (يمكنك تعديل هذه القيم لتناسب استراتيجيتك) ---
-VOLUME_SPIKE_MULTIPLIER = 10  # حجم التداول الحالي يجب أن يكون 10 أضعاف المتوسط (يعني 1000%)
-PRICE_ACTION_CANDLES = 6      # عدد الشموع التي سيتم تحليلها (على إطار ساعة)
-GREEN_CANDLE_THRESHOLD = 4    # الحد الأدنى لعدد الشموع الخضراء من إجمالي الشموع المحللة
-MIN_USDT_VOLUME = 500000      # تجاهل العملات ذات حجم تداول أقل من 500 ألف دولار لتجنب العملات الميتة
-RUN_EVERY_MINUTES = 15        # تشغيل الفحص كل 15 دقيقة
+VOLUME_SPIKE_MULTIPLIER = 10
+PRICE_ACTION_CANDLES = 6
+GREEN_CANDLE_THRESHOLD = 4
+MIN_USDT_VOLUME = 500000
+RUN_EVERY_MINUTES = 15
 
 # --- إعدادات متقدمة ---
 MEXC_API_BASE_URL = "https://api.mexc.com"
-COOLDOWN_PERIOD_HOURS = 2     # فترة الانتظار (بالساعات) قبل إرسال تنبيه جديد لنفس العملة
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+COOLDOWN_PERIOD_HOURS = 2
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # --- تهيئة البوت وقاعدة البيانات المؤقتة ---
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
-recently_alerted = {} # لتخزين العملات التي تم التنبيه عنها مؤخراً
+recently_alerted = {}
 
-def send_startup_message():
-    """يرسل رسالة تأكيدية عند بدء تشغيل البوت."""
-    try:
-        message = "✅ **بوت صياد الفومو متصل الآن!**\n\nسأقوم بمراقبة السوق وإرسال التنبيهات عند العثور على فرصة محتملة."
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
-        logging.info("تم إرسال رسالة بدء التشغيل بنجاح.")
-    except Exception as e:
-        logging.error(f"فشل في إرسال رسالة بدء التشغيل. يرجى التحقق من TELEGRAM_BOT_TOKEN و TELEGRAM_CHAT_ID. الخطأ: {e}")
+# =============================================================================
+# الوظائف التفاعلية (الرد على الأوامر)
+# =============================================================================
+def start_command(update, context):
+    """Handler for /start command."""
+    welcome_message = "✅ **أهلاً بك في بوت صياد الفومو!**\n\n"
+    welcome_message += "يقوم هذا البوت بمهمتين:\n"
+    welcome_message += "1- مراقبة السوق تلقائياً وإرسال تنبيهات فومو.\n"
+    welcome_message += "2- تزويدك بمعلومات عن السوق عند الطلب.\n\n"
+    welcome_message += "استخدم الأمر /top10 لمعرفة أكثر 10 عملات ارتفاعاً الآن."
+    update.message.reply_text(welcome_message, parse_mode=ParseMode.MARKDOWN)
 
-def get_usdt_pairs_from_mexc():
-    """جلب جميع أزواج التداول التي تنتهي بـ USDT من منصة MEXC."""
+def get_top_10_gainers(update, context):
+    """Fetches and sends the top 10 gaining coins from MEXC."""
     try:
+        update.message.reply_text("🔍 جارِ البحث عن أكثر 10 عملات ارتفاعاً، لحظات من فضلك...")
+        
         url = f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         data = response.json()
+
+        usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
         
-        if not isinstance(data, list) or not data:
-            logging.warning("API Ticker 24hr استجابت بنجاح ولكنها لم ترجع أي بيانات للعملات.")
-            return []
-            
-        usdt_pairs = [
-            s['symbol'] for s in data 
-            if s['symbol'].endswith('USDT')
-        ]
-        logging.info(f"تم العثور على {len(usdt_pairs)} زوج تداول مقابل USDT عبر Ticker API.")
+        # تحويل نسبة التغيير إلى رقم عشري للفرز
+        for pair in usdt_pairs:
+            pair['priceChangePercent_float'] = float(pair['priceChangePercent'])
+
+        # فرز العملات تنازلياً بناءً على نسبة الارتفاع
+        sorted_pairs = sorted(usdt_pairs, key=lambda x: x['priceChangePercent_float'], reverse=True)
+        
+        top_10 = sorted_pairs[:10]
+
+        message = "🔥 **أكثر 10 عملات ارتفاعاً في آخر 24 ساعة على MEXC** 🔥\n\n"
+        for i, pair in enumerate(top_10):
+            symbol = pair['symbol'].replace('USDT', '')
+            change = pair['priceChangePercent_float']
+            price = f"{float(pair['lastPrice']):.8f}".rstrip('0').rstrip('.')
+            message += f"{i+1}. **${symbol}**\n"
+            message += f"   - نسبة الارتفاع: `%{change:.2f}`\n"
+            message += f"   - السعر الحالي: `${price}`\n\n"
+        
+        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error in /top10 command: {e}")
+        update.message.reply_text("حدث خطأ أثناء جلب البيانات. يرجى المحاولة مرة أخرى لاحقاً.")
+
+# =============================================================================
+# وظائف صياد الفومو (تعمل في الخلفية)
+# =============================================================================
+def send_startup_message():
+    """Sends a confirmation message when the bot starts."""
+    try:
+        message = "✅ **بوت صياد الفومو متصل الآن!**\n\nسأقوم بمراقبة السوق وإرسال التنبيهات عند العثور على فرصة محتملة."
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
+        logger.info("تم إرسال رسالة بدء التشغيل بنجاح.")
+    except Exception as e:
+        logger.error(f"Failed to send startup message: {e}")
+
+def get_usdt_pairs_for_fomo():
+    """Gets all USDT pairs for the fomo hunter job."""
+    try:
+        url = f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        usdt_pairs = [s['symbol'] for s in data if s['symbol'].endswith('USDT')]
+        logger.info(f"Fomo Hunter: Found {len(usdt_pairs)} USDT pairs.")
         return usdt_pairs
-    except requests.exceptions.RequestException as e:
-        logging.error(f"خطأ في جلب قائمة العملات من MEXC عبر Ticker API: {e}")
+    except Exception as e:
+        logger.error(f"Fomo Hunter: Failed to get pairs: {e}")
         return []
 
 def analyze_symbol(symbol):
-    """
-    تحليل عملة واحدة بناءً على انفجار حجم التداول وقوة الصعود السعري.
-    (النسخة المطورة والأكثر مرونة)
-    """
+    """Analyzes a single symbol for fomo conditions."""
     try:
-        # --- الخطوة 1: جلب البيانات اللازمة (لا تغيير هنا) ---
+        # This function's logic remains the same
         klines_url = f"{MEXC_API_BASE_URL}/api/v3/klines"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 
-        # جلب حجم التداول اليومي للمقارنة
         daily_params = {'symbol': symbol, 'interval': '1d', 'limit': 2}
         daily_res = requests.get(klines_url, params=daily_params, headers=headers, timeout=10)
         daily_res.raise_for_status()
         daily_data = daily_res.json()
 
         if len(daily_data) < 2: return None
+        
+        previous_day_volume = float(daily_data[0][7])
+        current_day_volume = float(daily_data[1][7])
 
-        previous_day_volume = float(daily_data[0][7]) # حجم تداول الأمس بالـ USDT
-        current_day_volume = float(daily_data[1][7])  # حجم تداول اليوم بالـ USDT
-
-        # --- الخطوة 2: تطبيق الشروط الجديدة والمحسّنة ---
-
-        # الشرط الأولي: تجاهل العملات الضعيفة (لا تغيير هنا)
         if current_day_volume < MIN_USDT_VOLUME: return None
 
-        # الشرط الأول: انفجار حجم التداول (لا تغيير هنا)
-        # (يمكنك تعديل VOLUME_SPIKE_MULTIPLIER في الإعدادات لزيادة أو تقليل الحساسية)
-        is_volume_spike = current_day_volume > (previous_day_volume * VOLUME_SPIKE_MULTIPLIER)
-        if not is_volume_spike: return None
+        if previous_day_volume == 0:
+            volume_increase_percent = float('inf')
+        else:
+            volume_increase_percent = ((current_day_volume - previous_day_volume) / previous_day_volume) * 100
 
-        # [التغيير الجوهري هنا]
-        # الشرط الثاني الجديد: قياس "سرعة السعر" بدلاً من عد الشموع الخضراء
-        # سنقوم بجلب آخر 4 شموع ساعة لقياس الصعود في آخر 4 ساعات
-        hourly_params = {'symbol': symbol, 'interval': '1h', 'limit': 4}
+        if not current_day_volume > (previous_day_volume * VOLUME_SPIKE_MULTIPLIER): return None
+
+        hourly_params = {'symbol': symbol, 'interval': '1h', 'limit': PRICE_ACTION_CANDLES}
         hourly_res = requests.get(klines_url, params=hourly_params, headers=headers, timeout=10)
         hourly_res.raise_for_status()
         hourly_data = hourly_res.json()
-
-        if len(hourly_data) < 4: return None
-
-        # سعر الافتتاح لأول شمعة في السلسلة (منذ 4 ساعات)
-        initial_price = float(hourly_data[0][1])
-        # أعلى سعر تم الوصول إليه في الشمعة الأخيرة (الحالية)
-        latest_high_price = float(hourly_data[-1][2])
         
-        # حساب نسبة الصعود
-        if initial_price == 0: return None # تجنب القسمة على صفر
-        price_increase_percent = ((latest_high_price - initial_price) / initial_price) * 100
-        
-        # يمكنك تعديل هذه النسبة في الإعدادات. 30% تعني أننا نبحث عن صعود قوي ومفاجئ.
-        PRICE_VELOCITY_THRESHOLD = 30.0 
-        is_strong_pump = price_increase_percent >= PRICE_VELOCITY_THRESHOLD
-        
-        if not is_strong_pump: return None
+        if len(hourly_data) < PRICE_ACTION_CANDLES: return None
+        green_candles = sum(1 for c in hourly_data if float(c[4]) > float(c[1]))
+        if not green_candles >= GREEN_CANDLE_THRESHOLD: return None
 
-        # --- الخطوة 3: إذا تحققت كل الشروط، قم بإعداد بيانات التنبيه ---
         ticker_url = f"{MEXC_API_BASE_URL}/api/v3/ticker/price"
         price_res = requests.get(ticker_url, params={'symbol': symbol}, headers=headers, timeout=10)
         price_res.raise_for_status()
         current_price = float(price_res.json()['price'])
-        
-        volume_increase_percent = ((current_day_volume - previous_day_volume) / previous_day_volume) * 100 if previous_day_volume > 0 else float('inf')
 
         return {
             'symbol': symbol,
             'volume_increase': f"+{volume_increase_percent:,.2f}%",
-            'price_pattern': f"صعود بنسبة +{price_increase_percent:,.2f}% في آخر 4 ساعات",
+            'price_pattern': f"{green_candles}/{PRICE_ACTION_CANDLES} شموع خضراء",
             'current_price': f"{current_price:.8f}".rstrip('0').rstrip('.')
         }
-        
-    except requests.exceptions.RequestException:
-        return None
-    except Exception as e:
-        logging.error(f"خطأ غير متوقع عند تحليل {symbol}: {e}")
+    except Exception:
         return None
 
+def send_fomo_alert(alert_data):
+    """Sends a fomo alert message to the user."""
+    message = f"🚨 *تنبيه فومو محتمل!* 🚨\n\n*العملة:* `${alert_data['symbol']}`\n*منصة:* `MEXC`\n\n📈 *زيادة حجم التداول (24 ساعة):* `{alert_data['volume_increase']}`\n🕯️ *نمط السعر:* `{alert_data['price_pattern']}`\n💰 *السعر الحالي:* `{alert_data['current_price']}` USDT\n\n*(تحذير: هذا تنبيه آلي. قم بأبحاثك الخاصة.)*"
+    bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+    logger.info(f"Fomo alert sent for {alert_data['symbol']}")
 
-
-def send_telegram_alert(alert_data):
-    """إرسال رسالة تنبيه إلى تليجرام."""
-    message = f"""
-🚨 *تنبيه فومو محتمل!* 🚨
-
-*العملة:* `${alert_data['symbol']}`
-*منصة:* `MEXC`
-
-📈 *زيادة حجم التداول (24 ساعة):* `{alert_data['volume_increase']}`
-🕯️ *نمط السعر:* `{alert_data['price_pattern']}`
-💰 *السعر الحالي:* `{alert_data['current_price']}` USDT
-
-*(تحذير: هذا تنبيه آلي. قم بأبحاثك الخاصة قبل اتخاذ أي قرار.)*
-    """
-    try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
-        logging.info(f"تم إرسال تنبيه بنجاح للعملة: {alert_data['symbol']}")
-    except Exception as e:
-        logging.error(f"فشل إرسال رسالة تليجرام: {e}")
-
-def main_job():
-    """الوظيفة الرئيسية التي يتم تشغيلها بشكل دوري."""
-    logging.info("===== بدء جولة فحص جديدة =====")
-    
+def fomo_hunter_job():
+    """The main background job for hunting fomo."""
+    logger.info("===== بدء جولة فحص فومو جديدة =====")
     now = datetime.now(UTC)
     for symbol, timestamp in list(recently_alerted.items()):
         if now - timestamp > timedelta(hours=COOLDOWN_PERIOD_HOURS):
             del recently_alerted[symbol]
-            
-    symbols_to_check = get_usdt_pairs_from_mexc()
+    
+    symbols_to_check = get_usdt_pairs_for_fomo()
     if not symbols_to_check:
-        logging.warning("لم يتم العثور على عملات للفحص. سيتم إعادة المحاولة لاحقاً.")
         return
 
-    alert_count = 0
-    for i, symbol in enumerate(symbols_to_check):
+    for symbol in symbols_to_check:
         if symbol in recently_alerted: continue
-        if (i + 1) % 100 == 0: logging.info(f"تقدم الفحص: {i+1}/{len(symbols_to_check)}")
-
         alert_data = analyze_symbol(symbol)
-        
         if alert_data:
-            send_telegram_alert(alert_data)
+            send_fomo_alert(alert_data)
             recently_alerted[symbol] = datetime.now(UTC)
-            alert_count += 1
             time.sleep(1)
-    
-    logging.info(f"===== انتهاء جولة الفحص. تم العثور على {alert_count} تنبيه جديد. =====")
+    logger.info("===== انتهاء جولة فحص فومو =====")
 
-if __name__ == "__main__":
-    logging.info("تم تشغيل بوت 'صياد الفومو'.")
-    logging.info(f"سيتم إجراء الفحص كل {RUN_EVERY_MINUTES} دقيقة.")
-    
+# =============================================================================
+# تشغيل البوت والجدولة
+# =============================================================================
+def run_scheduler():
+    """Runs the scheduled jobs in a loop."""
+    schedule.every(RUN_EVERY_MINUTES).minutes.do(fomo_hunter_job)
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+
+def main():
+    """Starts the bot."""
     if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN or 'YOUR_TELEGRAM' in TELEGRAM_CHAT_ID:
-        logging.error("خطأ فادح: لم يتم تعيين توكن التليجرام أو معرف المحادثة. يرجى إضافتهم كمتغيرات بيئة.")
-    else:
-        # **الإضافة الجديدة: إرسال رسالة بدء التشغيل**
-        send_startup_message()
-        
-        schedule.every(RUN_EVERY_MINUTES).minutes.do(main_job)
-        while True:
-            schedule.run_pending()
-            time.sleep(1)
+        logger.error("خطأ فادح: لم يتم تعيين توكن التليجرام أو معرف المحادثة.")
+        return
 
+    # إعداد الـ Updater لاستقبال الأوامر
+    updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    # إضافة الأوامر التي يرد عليها البوت
+    dp.add_handler(CommandHandler("start", start_command))
+    dp.add_handler(CommandHandler("top10", get_top_10_gainers))
+
+    # تشغيل مهمة صياد الفومو في الخلفية
+    fomo_hunter_job() # تشغيل فوري مرة واحدة عند البدء
+    scheduler_thread = threading.Thread(target=run_scheduler)
+    scheduler_thread.daemon = True
+    scheduler_thread.start()
+    
+    # إرسال رسالة بدء التشغيل
+    send_startup_message()
+
+    # بدء استقبال الرسائل من تليجرام
+    updater.start_polling()
+    logger.info("البوت بدأ الآن في استقبال الأوامر...")
+    updater.idle()
+
+if __name__ == '__main__':
+    main()
