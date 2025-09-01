@@ -63,13 +63,18 @@ def get_usdt_pairs_from_mexc():
         return []
 
 def analyze_symbol(symbol):
-    """تحليل عملة واحدة بناءً على حجم التداول وحركة السعر."""
+    """
+    تحليل عملة واحدة بناءً على انفجار حجم التداول وقوة الصعود السعري.
+    (النسخة المطورة والأكثر مرونة)
+    """
     try:
+        # --- الخطوة 1: جلب البيانات اللازمة (لا تغيير هنا) ---
         klines_url = f"{MEXC_API_BASE_URL}/api/v3/klines"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
 
+        # جلب حجم التداول اليومي للمقارنة
         daily_params = {'symbol': symbol, 'interval': '1d', 'limit': 2}
         daily_res = requests.get(klines_url, params=daily_params, headers=headers, timeout=10)
         daily_res.raise_for_status()
@@ -77,47 +82,66 @@ def analyze_symbol(symbol):
 
         if len(daily_data) < 2: return None
 
-        previous_day_volume = float(daily_data[0][7]) 
-        current_day_volume = float(daily_data[1][7])
+        previous_day_volume = float(daily_data[0][7]) # حجم تداول الأمس بالـ USDT
+        current_day_volume = float(daily_data[1][7])  # حجم تداول اليوم بالـ USDT
 
+        # --- الخطوة 2: تطبيق الشروط الجديدة والمحسّنة ---
+
+        # الشرط الأولي: تجاهل العملات الضعيفة (لا تغيير هنا)
         if current_day_volume < MIN_USDT_VOLUME: return None
 
-        if previous_day_volume == 0:
-            volume_increase_percent = float('inf')
-        else:
-            volume_increase_percent = ((current_day_volume - previous_day_volume) / previous_day_volume) * 100
-
+        # الشرط الأول: انفجار حجم التداول (لا تغيير هنا)
+        # (يمكنك تعديل VOLUME_SPIKE_MULTIPLIER في الإعدادات لزيادة أو تقليل الحساسية)
         is_volume_spike = current_day_volume > (previous_day_volume * VOLUME_SPIKE_MULTIPLIER)
         if not is_volume_spike: return None
 
-        hourly_params = {'symbol': symbol, 'interval': '1h', 'limit': PRICE_ACTION_CANDLES}
+        # [التغيير الجوهري هنا]
+        # الشرط الثاني الجديد: قياس "سرعة السعر" بدلاً من عد الشموع الخضراء
+        # سنقوم بجلب آخر 4 شموع ساعة لقياس الصعود في آخر 4 ساعات
+        hourly_params = {'symbol': symbol, 'interval': '1h', 'limit': 4}
         hourly_res = requests.get(klines_url, params=hourly_params, headers=headers, timeout=10)
         hourly_res.raise_for_status()
         hourly_data = hourly_res.json()
 
-        if len(hourly_data) < PRICE_ACTION_CANDLES: return None
+        if len(hourly_data) < 4: return None
 
-        green_candles = sum(1 for c in hourly_data if float(c[4]) > float(c[1]))
+        # سعر الافتتاح لأول شمعة في السلسلة (منذ 4 ساعات)
+        initial_price = float(hourly_data[0][1])
+        # أعلى سعر تم الوصول إليه في الشمعة الأخيرة (الحالية)
+        latest_high_price = float(hourly_data[-1][2])
         
-        is_strong_uptrend = green_candles >= GREEN_CANDLE_THRESHOLD
-        if not is_strong_uptrend: return None
+        # حساب نسبة الصعود
+        if initial_price == 0: return None # تجنب القسمة على صفر
+        price_increase_percent = ((latest_high_price - initial_price) / initial_price) * 100
+        
+        # يمكنك تعديل هذه النسبة في الإعدادات. 30% تعني أننا نبحث عن صعود قوي ومفاجئ.
+        PRICE_VELOCITY_THRESHOLD = 30.0 
+        is_strong_pump = price_increase_percent >= PRICE_VELOCITY_THRESHOLD
+        
+        if not is_strong_pump: return None
 
+        # --- الخطوة 3: إذا تحققت كل الشروط، قم بإعداد بيانات التنبيه ---
         ticker_url = f"{MEXC_API_BASE_URL}/api/v3/ticker/price"
         price_res = requests.get(ticker_url, params={'symbol': symbol}, headers=headers, timeout=10)
         price_res.raise_for_status()
         current_price = float(price_res.json()['price'])
+        
+        volume_increase_percent = ((current_day_volume - previous_day_volume) / previous_day_volume) * 100 if previous_day_volume > 0 else float('inf')
 
         return {
             'symbol': symbol,
             'volume_increase': f"+{volume_increase_percent:,.2f}%",
-            'price_pattern': f"{green_candles} شمعة خضراء من آخر {PRICE_ACTION_CANDLES} شموع (إطار ساعة)",
+            'price_pattern': f"صعود بنسبة +{price_increase_percent:,.2f}% في آخر 4 ساعات",
             'current_price': f"{current_price:.8f}".rstrip('0').rstrip('.')
         }
+        
     except requests.exceptions.RequestException:
         return None
     except Exception as e:
         logging.error(f"خطأ غير متوقع عند تحليل {symbol}: {e}")
         return None
+
+
 
 def send_telegram_alert(alert_data):
     """إرسال رسالة تنبيه إلى تليجرام."""
