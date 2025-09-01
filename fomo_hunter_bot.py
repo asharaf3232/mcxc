@@ -5,11 +5,11 @@ import time
 import schedule
 import logging
 from telegram import Bot
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 
 # --- الإعدادات الرئيسية ---
-# سيتم جلب هذه المتغيرات من منصة Render عند النشر
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
+# سيتم جلب هذه المتغيرات من منصة النشر
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN') 
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
 # --- معايير التحليل (يمكنك تعديل هذه القيم لتناسب استراتيجيتك) ---
@@ -32,13 +32,21 @@ def get_usdt_pairs_from_mexc():
     """جلب جميع أزواج التداول التي تنتهي بـ USDT من منصة MEXC."""
     try:
         url = f"{MEXC_API_BASE_URL}/api/v3/exchangeInfo"
-        response = requests.get(url, timeout=10)
+        # **التعديل الجديد: إضافة هيدر المتصفح لتجنب الحظر**
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         data = response.json()
         
-        # فلترة للحصول على أزواج USDT النشطة فقط
+        # تحسين التحقق من البيانات المستلمة
+        if not data or 'symbols' not in data or not data['symbols']:
+            logging.warning("API MEXC استجابت بنجاح ولكنها لم ترجع أي بيانات للعملات. قد تكون هناك مشكلة مؤقتة في المنصة أو حظر على IP.")
+            return []
+            
         usdt_pairs = [
-            s['symbol'] for s in data['symbols']
+            s['symbol'] for s in data['symbols'] 
             if s['symbol'].endswith('USDT') and s['status'] == 'ENABLED'
         ]
         logging.info(f"تم العثور على {len(usdt_pairs)} زوج تداول مقابل USDT.")
@@ -50,10 +58,14 @@ def get_usdt_pairs_from_mexc():
 def analyze_symbol(symbol):
     """تحليل عملة واحدة بناءً على حجم التداول وحركة السعر."""
     try:
-        # 1. فحص حجم التداول (Volume Check)
         klines_url = f"{MEXC_API_BASE_URL}/api/v3/klines"
+        headers = { # إضافة الهيدر هنا أيضاً للاحتياط
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+
+        # 1. فحص حجم التداول (Volume Check)
         daily_params = {'symbol': symbol, 'interval': '1d', 'limit': 2}
-        daily_res = requests.get(klines_url, params=daily_params, timeout=10)
+        daily_res = requests.get(klines_url, params=daily_params, headers=headers, timeout=10)
         daily_res.raise_for_status()
         daily_data = daily_res.json()
 
@@ -74,7 +86,7 @@ def analyze_symbol(symbol):
 
         # 2. فحص حركة السعر (Price Action Check)
         hourly_params = {'symbol': symbol, 'interval': '1h', 'limit': PRICE_ACTION_CANDLES}
-        hourly_res = requests.get(klines_url, params=hourly_params, timeout=10)
+        hourly_res = requests.get(klines_url, params=hourly_params, headers=headers, timeout=10)
         hourly_res.raise_for_status()
         hourly_data = hourly_res.json()
 
@@ -87,7 +99,7 @@ def analyze_symbol(symbol):
 
         # 3. جلب السعر الحالي
         ticker_url = f"{MEXC_API_BASE_URL}/api/v3/ticker/price"
-        price_res = requests.get(ticker_url, params={'symbol': symbol}, timeout=10)
+        price_res = requests.get(ticker_url, params={'symbol': symbol}, headers=headers, timeout=10)
         price_res.raise_for_status()
         current_price = float(price_res.json()['price'])
 
@@ -127,7 +139,8 @@ def main_job():
     """الوظيفة الرئيسية التي يتم تشغيلها بشكل دوري."""
     logging.info("===== بدء جولة فحص جديدة =====")
     
-    now = datetime.utcnow()
+    # **التعديل الجديد: إصلاح تحذير utcnow()**
+    now = datetime.now(UTC)
     for symbol, timestamp in list(recently_alerted.items()):
         if now - timestamp > timedelta(hours=COOLDOWN_PERIOD_HOURS):
             del recently_alerted[symbol]
@@ -146,7 +159,7 @@ def main_job():
         
         if alert_data:
             send_telegram_alert(alert_data)
-            recently_alerted[symbol] = datetime.utcnow()
+            recently_alerted[symbol] = datetime.now(UTC)
             alert_count += 1
             time.sleep(1)
     
@@ -157,7 +170,7 @@ if __name__ == "__main__":
     logging.info(f"سيتم إجراء الفحص كل {RUN_EVERY_MINUTES} دقيقة.")
     
     if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN or 'YOUR_TELEGRAM' in TELEGRAM_CHAT_ID:
-        logging.error("خطأ فادح: لم يتم تعيين توكن التليجرام أو معرف المحادثة. يرجى إضافتهم كمتغيرات بيئة (Environment Variables) في منصة Render.")
+        logging.error("خطأ فادح: لم يتم تعيين توكن التليجرام أو معرف المحادثة. يرجى إضافتهم كمتغيرات بيئة.")
     else:
         main_job()
         schedule.every(RUN_EVERY_MINUTES).minutes.do(main_job)
