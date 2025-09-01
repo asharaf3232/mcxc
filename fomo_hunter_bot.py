@@ -22,10 +22,10 @@ RUN_FOMO_SCAN_EVERY_MINUTES = 15
 # --- إعدادات قناص الإدراجات ---
 RUN_LISTING_SCAN_EVERY_SECONDS = 60
 
-# --- [جديد] إعدادات صياد الأنماط ---
-RUN_PATTERN_SCAN_EVERY_HOURS = 1 # فحص الأنماط كل ساعة
-PATTERN_SIGHTING_THRESHOLD = 3   # عدد المرات التي يجب أن تظهر فيها العملة لت触发 التنبيه
-PATTERN_LOOKBACK_DAYS = 7        # تجاهل العملات التي لم تظهر في آخر 7 أيام
+# --- إعدادات صياد الأنماط ---
+RUN_PATTERN_SCAN_EVERY_HOURS = 1
+PATTERN_SIGHTING_THRESHOLD = 3
+PATTERN_LOOKBACK_DAYS = 7
 
 # --- إعدادات متقدمة ---
 MEXC_API_BASE_URL = "https://api.mexc.com"
@@ -37,18 +37,19 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 recently_alerted_fomo = {}
 known_symbols = set()
-# [جديد] ذاكرة صياد الأنماط
-pattern_tracker = {} # e.g., {'BTCUSDT': {'count': 2, 'last_seen': datetime}}
+pattern_tracker = {}
 recently_alerted_pattern = {}
 
 # =============================================================================
 # الوظائف التفاعلية (الأزرار والأوامر)
 # =============================================================================
 def build_menu():
+    """Builds the main menu keyboard with the new report button."""
     keyboard = [
-        [InlineKeyboardButton("📈 الأكثر ارتفاعاً", callback_data='top_gainers')],
-        [InlineKeyboardButton("📉 الأكثر انخفاضاً", callback_data='top_losers')],
+        [InlineKeyboardButton("📈 الأكثر ارتفاعاً", callback_data='top_gainers'),
+         InlineKeyboardButton("📉 الأكثر انخفاضاً", callback_data='top_losers')],
         [InlineKeyboardButton("💰 الأعلى سيولة (فوليوم)", callback_data='top_volume')],
+        [InlineKeyboardButton("📊 تقرير الأداء اليومي", callback_data='daily_report')] # [جديد]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -62,21 +63,70 @@ def start_command(update, context):
     update.message.reply_text(welcome_message, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
 
 def button_handler(update, context):
-    query = update.callback_query; query.answer()
+    """Handles all button presses."""
+    query = update.callback_query
+    query.answer()
     context.bot.send_message(chat_id=query.message.chat_id, text=f"🔍 جارِ تنفيذ طلبك...")
-    if query.data == 'top_gainers': get_top_10_gainers(context, query.message.chat_id)
-    elif query.data == 'top_losers': get_top_10_losers(context, query.message.chat_id)
-    elif query.data == 'top_volume': get_top_10_volume(context, query.message.chat_id)
+    
+    # [تحديث] إضافة معالج للزر الجديد
+    if query.data == 'top_gainers':
+        get_top_10_gainers(context, query.message.chat_id)
+    elif query.data == 'top_losers':
+        get_top_10_losers(context, query.message.chat_id)
+    elif query.data == 'top_volume':
+        get_top_10_volume(context, query.message.chat_id)
+    elif query.data == 'daily_report':
+        send_daily_report(context, query.message.chat_id)
 
 def get_market_data():
-    url = f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr"; headers = {'User-Agent': 'Mozilla/5.0'}
-    response = requests.get(url, headers=headers, timeout=15); response.raise_for_status()
+    """Helper function to get all market data from MEXC."""
+    url = f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    response = requests.get(url, headers=headers, timeout=15)
+    response.raise_for_status()
     return response.json()
 
 def format_price(price_str):
+    """Helper to format price strings cleanly."""
     price_float = float(price_str)
     return f"{price_float:.8f}".rstrip('0').rstrip('.')
 
+# [جديد] الدالة الخاصة بإنشاء التقرير اليومي
+def send_daily_report(context, chat_id):
+    """Creates and sends a daily performance report based on top volume."""
+    try:
+        data = get_market_data()
+        usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
+        for pair in usdt_pairs:
+            pair['quoteVolume_float'] = float(pair['quoteVolume'])
+        
+        # فرز العملات حسب حجم التداول
+        sorted_by_volume = sorted(usdt_pairs, key=lambda x: x['quoteVolume_float'], reverse=True)
+        top_10 = sorted_by_volume[:10]
+        
+        today_date = datetime.now().strftime('%d.%m')
+        
+        # بناء الرسالة بنفس الشكل المطلوب
+        message = f"📊 **تقرير MEXC اليومي {today_date}!** 🔥💰\n\n"
+        message += "**الأفضل أداءً اليوم (حسب حجم التداول):**\n"
+        
+        emoji_map = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟"}
+        
+        for i, pair in enumerate(top_10):
+            rank = i + 1
+            symbol = pair['symbol']
+            volume = pair['quoteVolume_float']
+            message += f"{emoji_map.get(rank, f'{rank}.')} ${symbol}: `${volume:,.0f}`\n"
+            
+        message += "\n*يتم الترتيب بناءً على إجمالي حجم التداول بالـ USDT خلال آخر 24 ساعة.*"
+        
+        context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error in send_daily_report: {e}")
+        context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء إنشاء التقرير اليومي.")
+
+# ... (بقية دوال الأزرار تبقى كما هي)
 def get_top_10_gainers(context, chat_id):
     try:
         data = get_market_data(); usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
@@ -86,9 +136,7 @@ def get_top_10_gainers(context, chat_id):
         for i, pair in enumerate(sorted_pairs[:10]):
             message += f"{i+1}. **${pair['symbol'].replace('USDT', '')}**\n   - نسبة الارتفاع: `%{pair['priceChangePercent_float']:+.2f}`\n   - السعر الحالي: `${format_price(pair['lastPrice'])}`\n\n"
         context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Error in get_top_10_gainers: {e}"); context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء جلب البيانات.")
-
+    except Exception as e: logger.error(f"Error in get_top_10_gainers: {e}"); context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء جلب البيانات.")
 def get_top_10_losers(context, chat_id):
     try:
         data = get_market_data(); usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
@@ -98,9 +146,7 @@ def get_top_10_losers(context, chat_id):
         for i, pair in enumerate(sorted_pairs[:10]):
             message += f"{i+1}. **${pair['symbol'].replace('USDT', '')}**\n   - نسبة الانخفاض: `%{pair['priceChangePercent_float']:+.2f}`\n   - السعر الحالي: `${format_price(pair['lastPrice'])}`\n\n"
         context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Error in get_top_10_losers: {e}"); context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء جلب البيانات.")
-
+    except Exception as e: logger.error(f"Error in get_top_10_losers: {e}"); context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء جلب البيانات.")
 def get_top_10_volume(context, chat_id):
     try:
         data = get_market_data(); usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
@@ -110,74 +156,42 @@ def get_top_10_volume(context, chat_id):
         for i, pair in enumerate(sorted_pairs[:10]):
             message += f"{i+1}. **${pair['symbol'].replace('USDT', '')}**\n   - حجم التداول: `${pair['quoteVolume_float']:,.0f}`\n   - السعر الحالي: `${format_price(pair['lastPrice'])}`\n\n"
         context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Error in get_top_10_volume: {e}"); context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء جلب البيانات.")
+    except Exception as e: logger.error(f"Error in get_top_10_volume: {e}"); context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء جلب البيانات.")
 
 # =============================================================================
-# [جديد] وظائف صياد الأنماط
+# المهام الآلية (تعمل في الخلفية - لا تغيير هنا)
 # =============================================================================
 def pattern_hunter_job():
-    """
-    Scans top gainers to find coins that are repeatedly pumping.
-    This job develops a "memory" of hot coins.
-    """
-    global pattern_tracker, recently_alerted_pattern
-    logger.info("Pattern Hunter: Starting scan for repeating patterns...")
+    global pattern_tracker, recently_alerted_pattern; logger.info("Pattern Hunter: Starting scan...")
     now = datetime.now(UTC)
-
-    # 1. Cleanup old coins from tracker and recent alerts
     for symbol in list(pattern_tracker.keys()):
-        if now - pattern_tracker[symbol]['last_seen'] > timedelta(days=PATTERN_LOOKBACK_DAYS):
-            del pattern_tracker[symbol]
+        if now - pattern_tracker[symbol]['last_seen'] > timedelta(days=PATTERN_LOOKBACK_DAYS): del pattern_tracker[symbol]
     for symbol in list(recently_alerted_pattern.keys()):
-        if now - recently_alerted_pattern[symbol] > timedelta(days=PATTERN_LOOKBACK_DAYS):
-            del recently_alerted_pattern[symbol]
-
-    # 2. Get top 30 gainers to check for patterns
+        if now - recently_alerted_pattern[symbol] > timedelta(days=PATTERN_LOOKBACK_DAYS): del recently_alerted_pattern[symbol]
     try:
-        data = get_market_data()
-        usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
+        data = get_market_data(); usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
         for pair in usdt_pairs: pair['priceChangePercent_float'] = float(pair['priceChangePercent']) * 100
         top_gainers = sorted(usdt_pairs, key=lambda x: x['priceChangePercent_float'], reverse=True)[:30]
-        
-        # 3. Update tracker with new sightings
         for coin in top_gainers:
             symbol = coin['symbol']
             if symbol in pattern_tracker:
-                # Update existing entry if it's a new day
                 if now.date() > pattern_tracker[symbol]['last_seen'].date():
-                    pattern_tracker[symbol]['count'] += 1
-                    pattern_tracker[symbol]['last_seen'] = now
-            else:
-                # Add new entry
-                pattern_tracker[symbol] = {'count': 1, 'last_seen': now}
-        
-        # 4. Check if any coin has reached the threshold
+                    pattern_tracker[symbol]['count'] += 1; pattern_tracker[symbol]['last_seen'] = now
+            else: pattern_tracker[symbol] = {'count': 1, 'last_seen': now}
         for symbol, data in pattern_tracker.items():
             if data['count'] >= PATTERN_SIGHTING_THRESHOLD and symbol not in recently_alerted_pattern:
                 logger.info(f"Pattern Hunter: PATTERN DETECTED for {symbol}!")
-                message = f"🧠 **تنبيه صياد الأنماط: تم رصد سلوك متكرر!** 🧠\n\n"
-                message += f"العملة **${symbol.replace('USDT', '')}** ظهرت في قائمة الأعلى ارتفاعاً **{data['count']} مرات** خلال الأيام القليلة الماضية.\n\n"
-                message += "قد يشير هذا إلى اهتمام مستمر وقوة شرائية متواصلة.\n\n"
-                message += "*(هذا ليس تنبيه فومو لحظي، بل ملاحظة لنمط متكرر.)*"
+                message = f"🧠 **تنبيه صياد الأنماط: تم رصد سلوك متكرر!** 🧠\n\nالعملة **${symbol.replace('USDT', '')}** ظهرت في قائمة الأعلى ارتفاعاً **{data['count']} مرات** خلال الأيام القليلة الماضية.\n\nقد يشير هذا إلى اهتمام مستمر وقوة شرائية متواصلة.\n\n*(هذا ليس تنبيه فومو لحظي، بل ملاحظة لنمط متكرر.)*"
                 bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
-                recently_alerted_pattern[symbol] = now # Mark as alerted to avoid spam
-                
-    except Exception as e:
-        logger.error(f"Pattern Hunter: Error during scan: {e}")
-
-# =============================================================================
-# وظائف قناص الإدراجات الجديدة (لا تغيير هنا)
-# =============================================================================
+                recently_alerted_pattern[symbol] = now
+    except Exception as e: logger.error(f"Pattern Hunter: Error during scan: {e}")
 def new_listings_sniper_job():
     global known_symbols; logger.info("Sniper: Checking for new listings...")
     try:
         url = f"{MEXC_API_BASE_URL}/api/v3/exchangeInfo"; headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=15); response.raise_for_status()
         current_symbols = {s['symbol'] for s in response.json()['symbols'] if s['symbol'].endswith('USDT') and s['status'] == 'ENABLED'}
-        if not known_symbols:
-            known_symbols = current_symbols; logger.info(f"Sniper: Initialized with {len(known_symbols)} symbols.")
-            return
+        if not known_symbols: known_symbols = current_symbols; logger.info(f"Sniper: Initialized with {len(known_symbols)} symbols."); return
         newly_listed = current_symbols - known_symbols
         if newly_listed:
             for symbol in newly_listed:
@@ -185,15 +199,9 @@ def new_listings_sniper_job():
                 message = f"🎯 **تنبيه قناص: إدراج جديد!** 🎯\n\nتم للتو إدراج عملة جديدة على منصة MEXC:\n\n**العملة:** `${symbol}`\n\n*(مخاطر عالية! قم ببحثك بسرعة فائقة.)*"
                 bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
             known_symbols.update(newly_listed)
-    except Exception as e:
-        logger.error(f"Sniper: Error checking for new listings: {e}")
-
-# =============================================================================
-# وظائف صياد الفومو (لا تغيير هنا)
-# =============================================================================
+    except Exception as e: logger.error(f"Sniper: Error checking for new listings: {e}")
 def fomo_hunter_job():
-    logger.info("===== Fomo Hunter: Starting Scan =====")
-    now = datetime.now(UTC)
+    logger.info("===== Fomo Hunter: Starting Scan ====="); now = datetime.now(UTC)
     for symbol, timestamp in list(recently_alerted_fomo.items()):
         if now - timestamp > timedelta(hours=COOLDOWN_PERIOD_HOURS): del recently_alerted_fomo[symbol]
     symbols_to_check = [s['symbol'] for s in get_market_data() if s['symbol'].endswith('USDT')]
@@ -205,11 +213,8 @@ def fomo_hunter_job():
         if alert_data: 
             message = f"🚨 *تنبيه فومو محتمل!* 🚨\n\n*العملة:* `${alert_data['symbol']}`\n*منصة:* `MEXC`\n\n📈 *زيادة حجم التداول:* `{alert_data['volume_increase']}`\n🕯️ *نمط السعر:* `{alert_data['price_pattern']}`\n💰 *السعر الحالي:* `{alert_data['current_price']}` USDT\n\n*(تحذير: هذا تنبيه آلي.)*"
             bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
-            logger.info(f"Fomo alert sent for {alert_data['symbol']}")
-            recently_alerted_fomo[symbol] = now
-            time.sleep(1)
+            logger.info(f"Fomo alert sent for {alert_data['symbol']}"); recently_alerted_fomo[symbol] = now; time.sleep(1)
     logger.info("===== Fomo Hunter: Scan Finished =====")
-
 def analyze_symbol(symbol): # Helper for fomo_hunter_job
     try:
         klines_url = f"{MEXC_API_BASE_URL}/api/v3/klines"; headers = {'User-Agent': 'Mozilla/5.0'}
@@ -241,38 +246,24 @@ def send_startup_message():
 
 def run_scheduler():
     logger.info("Scheduler thread started.")
-    # جدولة جميع المهام
     schedule.every(RUN_FOMO_SCAN_EVERY_MINUTES).minutes.do(fomo_hunter_job)
     schedule.every(RUN_LISTING_SCAN_EVERY_SECONDS).seconds.do(new_listings_sniper_job)
-    schedule.every(RUN_PATTERN_SCAN_EVERY_HOURS).hours.do(pattern_hunter_job) # [جديد]
-    
-    # تشغيل المهام لأول مرة فوراً لتجهيز الذاكرة
+    schedule.every(RUN_PATTERN_SCAN_EVERY_HOURS).hours.do(pattern_hunter_job)
     threading.Thread(target=fomo_hunter_job).start()
     threading.Thread(target=new_listings_sniper_job).start()
     threading.Thread(target=pattern_hunter_job).start()
-    
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+    while True: schedule.run_pending(); time.sleep(1)
 
 def main():
     if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN or 'YOUR_TELEGRAM' in TELEGRAM_CHAT_ID:
         logger.error("FATAL ERROR: Bot token or chat ID are not set."); return
-
     updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("start", start_command))
     dp.add_handler(CallbackQueryHandler(button_handler))
-
     send_startup_message()
-
-    scheduler_thread = threading.Thread(target=run_scheduler)
-    scheduler_thread.daemon = True
-    scheduler_thread.start()
-    
-    updater.start_polling()
-    logger.info("Bot is now polling for commands and button clicks...")
-    updater.idle()
+    scheduler_thread = threading.Thread(target=run_scheduler); scheduler_thread.daemon = True; scheduler_thread.start()
+    updater.start_polling(); logger.info("Bot is now polling for commands and button clicks..."); updater.idle()
 
 if __name__ == '__main__':
     main()
