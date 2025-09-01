@@ -48,18 +48,16 @@ def get_top_10_gainers(update, context):
         update.message.reply_text("🔍 جارِ البحث عن أكثر 10 عملات ارتفاعاً، لحظات من فضلك...")
         
         url = f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         data = response.json()
 
         usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
         
-        # تحويل نسبة التغيير إلى رقم عشري للفرز
         for pair in usdt_pairs:
             pair['priceChangePercent_float'] = float(pair['priceChangePercent'])
 
-        # فرز العملات تنازلياً بناءً على نسبة الارتفاع
         sorted_pairs = sorted(usdt_pairs, key=lambda x: x['priceChangePercent_float'], reverse=True)
         
         top_10 = sorted_pairs[:10]
@@ -95,7 +93,7 @@ def get_usdt_pairs_for_fomo():
     """Gets all USDT pairs for the fomo hunter job."""
     try:
         url = f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         data = response.json()
@@ -109,9 +107,8 @@ def get_usdt_pairs_for_fomo():
 def analyze_symbol(symbol):
     """Analyzes a single symbol for fomo conditions."""
     try:
-        # This function's logic remains the same
         klines_url = f"{MEXC_API_BASE_URL}/api/v3/klines"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
 
         daily_params = {'symbol': symbol, 'interval': '1d', 'limit': 2}
         daily_res = requests.get(klines_url, params=daily_params, headers=headers, timeout=10)
@@ -186,14 +183,17 @@ def fomo_hunter_job():
 # تشغيل البوت والجدولة
 # =============================================================================
 def run_scheduler():
-    """Runs the scheduled jobs in a loop."""
+    """Runs the scheduled jobs in a background thread."""
+    logger.info("Scheduler thread started. Running first fomo scan...")
+    fomo_hunter_job()  # Run the job once immediately
+    
     schedule.every(RUN_EVERY_MINUTES).minutes.do(fomo_hunter_job)
     while True:
         schedule.run_pending()
         time.sleep(1)
 
 def main():
-    """Starts the bot."""
+    """Starts the bot and the background thread."""
     if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN or 'YOUR_TELEGRAM' in TELEGRAM_CHAT_ID:
         logger.error("خطأ فادح: لم يتم تعيين توكن التليجرام أو معرف المحادثة.")
         return
@@ -206,16 +206,15 @@ def main():
     dp.add_handler(CommandHandler("start", start_command))
     dp.add_handler(CommandHandler("top10", get_top_10_gainers))
 
-    # تشغيل مهمة صياد الفومو في الخلفية
-    fomo_hunter_job() # تشغيل فوري مرة واحدة عند البدء
+    # إرسال رسالة بدء التشغيل
+    send_startup_message()
+
+    # تشغيل مهمة صياد الفومو في الخلفية (في عامل منفصل)
     scheduler_thread = threading.Thread(target=run_scheduler)
     scheduler_thread.daemon = True
     scheduler_thread.start()
     
-    # إرسال رسالة بدء التشغيل
-    send_startup_message()
-
-    # بدء استقبال الرسائل من تليجرام
+    # بدء استقبال الرسائل من تليجرام (في العامل الرئيسي)
     updater.start_polling()
     logger.info("البوت بدأ الآن في استقبال الأوامر...")
     updater.idle()
