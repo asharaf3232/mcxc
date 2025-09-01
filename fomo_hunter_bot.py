@@ -28,11 +28,17 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 recently_alerted = {} # لتخزين العملات التي تم التنبيه عنها مؤخراً
 
+def send_startup_message():
+    """يرسل رسالة تأكيدية عند بدء تشغيل البوت."""
+    try:
+        message = "✅ **بوت صياد الفومو متصل الآن!**\n\nسأقوم بمراقبة السوق وإرسال التنبيهات عند العثور على فرصة محتملة."
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
+        logging.info("تم إرسال رسالة بدء التشغيل بنجاح.")
+    except Exception as e:
+        logging.error(f"فشل في إرسال رسالة بدء التشغيل. يرجى التحقق من TELEGRAM_BOT_TOKEN و TELEGRAM_CHAT_ID. الخطأ: {e}")
+
 def get_usdt_pairs_from_mexc():
-    """
-    جلب جميع أزواج التداول التي تنتهي بـ USDT من منصة MEXC.
-    **التعديل الجديد: استخدام نقطة نهاية Ticker API لتجنب الحظر.**
-    """
+    """جلب جميع أزواج التداول التي تنتهي بـ USDT من منصة MEXC."""
     try:
         url = f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr"
         headers = {
@@ -46,7 +52,6 @@ def get_usdt_pairs_from_mexc():
             logging.warning("API Ticker 24hr استجابت بنجاح ولكنها لم ترجع أي بيانات للعملات.")
             return []
             
-        # لا نحتاج لفلترة الحالة 'ENABLED' هنا لأن هذا الـ endpoint يرجع الأزواج النشطة فقط
         usdt_pairs = [
             s['symbol'] for s in data 
             if s['symbol'].endswith('USDT')
@@ -61,11 +66,10 @@ def analyze_symbol(symbol):
     """تحليل عملة واحدة بناءً على حجم التداول وحركة السعر."""
     try:
         klines_url = f"{MEXC_API_BASE_URL}/api/v3/klines"
-        headers = { # إضافة الهيدر هنا أيضاً للاحتياط
+        headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
 
-        # 1. فحص حجم التداول (Volume Check)
         daily_params = {'symbol': symbol, 'interval': '1d', 'limit': 2}
         daily_res = requests.get(klines_url, params=daily_params, headers=headers, timeout=10)
         daily_res.raise_for_status()
@@ -73,7 +77,6 @@ def analyze_symbol(symbol):
 
         if len(daily_data) < 2: return None
 
-        # MEXC ترجع حجم التداول كـ "quote asset volume" في klines, وهو ما نحتاجه (USDT volume)
         previous_day_volume = float(daily_data[0][7]) 
         current_day_volume = float(daily_data[1][7])
 
@@ -87,7 +90,6 @@ def analyze_symbol(symbol):
         is_volume_spike = current_day_volume > (previous_day_volume * VOLUME_SPIKE_MULTIPLIER)
         if not is_volume_spike: return None
 
-        # 2. فحص حركة السعر (Price Action Check)
         hourly_params = {'symbol': symbol, 'interval': '1h', 'limit': PRICE_ACTION_CANDLES}
         hourly_res = requests.get(klines_url, params=hourly_params, headers=headers, timeout=10)
         hourly_res.raise_for_status()
@@ -100,7 +102,6 @@ def analyze_symbol(symbol):
         is_strong_uptrend = green_candles >= GREEN_CANDLE_THRESHOLD
         if not is_strong_uptrend: return None
 
-        # 3. جلب السعر الحالي
         ticker_url = f"{MEXC_API_BASE_URL}/api/v3/ticker/price"
         price_res = requests.get(ticker_url, params={'symbol': symbol}, headers=headers, timeout=10)
         price_res.raise_for_status()
@@ -174,7 +175,9 @@ if __name__ == "__main__":
     if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN or 'YOUR_TELEGRAM' in TELEGRAM_CHAT_ID:
         logging.error("خطأ فادح: لم يتم تعيين توكن التليجرام أو معرف المحادثة. يرجى إضافتهم كمتغيرات بيئة.")
     else:
-        main_job()
+        # **الإضافة الجديدة: إرسال رسالة بدء التشغيل**
+        send_startup_message()
+        
         schedule.every(RUN_EVERY_MINUTES).minutes.do(main_job)
         while True:
             schedule.run_pending()
