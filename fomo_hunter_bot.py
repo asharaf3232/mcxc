@@ -27,12 +27,12 @@ RUN_PATTERN_SCAN_EVERY_HOURS = 1
 PATTERN_SIGHTING_THRESHOLD = 3
 PATTERN_LOOKBACK_DAYS = 7
 
-# --- [جديد] إعدادات كاشف الزخم (Momentum Detector) ---
-MOMENTUM_MAX_PRICE = 0.10          # أقصى سعر للعملة
-MOMENTUM_MIN_VOLUME_24H = 50000     # أقل حجم تداول يومي مقبول
-MOMENTUM_MAX_VOLUME_24H = 2000000   # أقصى حجم تداول يومي
-MOMENTUM_VOLUME_INCREASE = 2.0      # حجم التداول في آخر ساعتين يجب أن يكون ضعف الساعتين قبلها (2.0 = 100% زيادة)
-MOMENTUM_PRICE_INCREASE = 5.0       # السعر يجب أن يكون قد ارتفع بنسبة 5% على الأقل في آخر ساعتين
+# --- إعدادات كاشف الزخم (Momentum Detector) ---
+MOMENTUM_MAX_PRICE = 0.10
+MOMENTUM_MIN_VOLUME_24H = 50000
+MOMENTUM_MAX_VOLUME_24H = 2000000
+MOMENTUM_VOLUME_INCREASE = 2.0
+MOMENTUM_PRICE_INCREASE = 5.0
 
 # --- إعدادات متقدمة ---
 MEXC_API_BASE_URL = "https://api.mexc.com"
@@ -55,7 +55,7 @@ def build_menu():
         [InlineKeyboardButton("📈 الأكثر ارتفاعاً", callback_data='top_gainers'),
          InlineKeyboardButton("📉 الأكثر انخفاضاً", callback_data='top_losers')],
         [InlineKeyboardButton("💰 الأعلى سيولة (عام)", callback_data='top_volume')],
-        [InlineKeyboardButton("🚀 كاشف الزخم", callback_data='momentum_detector')] # [تغيير]
+        [InlineKeyboardButton("🚀 كاشف الزخم", callback_data='momentum_detector')]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -70,12 +70,12 @@ def start_command(update, context):
 
 def button_handler(update, context):
     query = update.callback_query; query.answer()
-    context.bot.send_message(chat_id=query.message.chat_id, text=f"🔍 جارِ تنفيذ طلبك، قد يستغرق هذا بعض الوقت...")
     
+    # [تغيير] الآن لن نرسل رسالة "جار التنفيذ" هنا، كل دالة ستدير رسائلها بنفسها
     if query.data == 'top_gainers': get_top_10_gainers(context, query.message.chat_id)
     elif query.data == 'top_losers': get_top_10_losers(context, query.message.chat_id)
     elif query.data == 'top_volume': get_top_10_volume(context, query.message.chat_id)
-    elif query.data == 'momentum_detector': send_momentum_detector_report(context, query.message.chat_id)
+    elif query.data == 'momentum_detector': send_momentum_detector_report(context, query.message.chat_id, query.message.message_id)
 
 def get_market_data():
     url = f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr"; headers = {'User-Agent': 'Mozilla/5.0'}
@@ -85,92 +85,72 @@ def get_market_data():
 def format_price(price_str):
     price_float = float(price_str); return f"{price_float:.8f}".rstrip('0').rstrip('.')
 
-# [جديد] الدالة الخاصة بتقرير كاشف الزخم
-def send_momentum_detector_report(context, chat_id):
+# [تغيير جوهري] دالة كاشف الزخم أصبحت تعدل رسالة واحدة بدلاً من إرسال رسائل جديدة
+def send_momentum_detector_report(context, chat_id, message_id=None):
+    # إرسال أو تعديل الرسالة الأولية
+    initial_text = "🔍 جارِ تنفيذ طلبك، قد يستغرق هذا بعض الوقت..."
+    if message_id:
+        # إذا كان الطلب من زر، نعدل الرسالة الأصلية للزر
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    else:
+        # إذا تم استدعاؤها مباشرة، نرسل رسالة جديدة
+        sent_message = context.bot.send_message(chat_id=chat_id, text=initial_text)
+        message_id = sent_message.message_id
+        
     try:
         market_data = get_market_data()
-        
-        # فلترة أولية بناءً على السعر وحجم التداول اليومي
         potential_coins = []
         for pair in market_data:
             if not pair['symbol'].endswith('USDT'): continue
             try:
-                price = float(pair['lastPrice'])
-                volume_24h = float(pair['quoteVolume'])
-                if (price <= MOMENTUM_MAX_PRICE and
-                    MOMENTUM_MIN_VOLUME_24H <= volume_24h <= MOMENTUM_MAX_VOLUME_24H):
+                price = float(pair['lastPrice']); volume_24h = float(pair['quoteVolume'])
+                if (price <= MOMENTUM_MAX_PRICE and MOMENTUM_MIN_VOLUME_24H <= volume_24h <= MOMENTUM_MAX_VOLUME_24H):
                     potential_coins.append(pair['symbol'])
             except (ValueError, TypeError): continue
             
         if not potential_coins:
-            context.bot.send_message(chat_id=chat_id, text="🚀 لم يتم العثور على عملات بالفلترة الأولية. حاول لاحقاً."); return
+            context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="🚀 لم يتم العثور على عملات بالفلترة الأولية. حاول لاحقاً."); return
 
         momentum_coins = []
         for i, symbol in enumerate(potential_coins):
-            # لإظهار التقدم للمستخدمين الذين ينتظرون
-            if (i + 1) % 20 == 0: context.bot.send_message(chat_id=chat_id, text=f"⏳ يتم فحص العملة رقم {i+1} من {len(potential_coins)}...")
-            
-            try:
-                # جلب بيانات الشموع لآخر 4 ساعات (16 شمعة * 15 دقيقة)
-                klines_url = f"{MEXC_API_BASE_URL}/api/v3/klines"
-                params = {'symbol': symbol, 'interval': '15m', 'limit': 16}
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                res = requests.get(klines_url, params=params, headers=headers, timeout=10)
-                res.raise_for_status()
-                klines = res.json()
+            if (i + 1) % 20 == 0:
+                progress_text = f"⏳ يتم فحص العملة رقم {i+1} من {len(potential_coins)}..."
+                try:
+                    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=progress_text)
+                except Exception: pass # تجاهل الأخطاء إذا لم يتغير النص
                 
+            try:
+                klines_url = f"{MEXC_API_BASE_URL}/api/v3/klines"; params = {'symbol': symbol, 'interval': '15m', 'limit': 16}; headers = {'User-Agent': 'Mozilla/5.0'}
+                res = requests.get(klines_url, params=params, headers=headers, timeout=10); res.raise_for_status(); klines = res.json()
                 if len(klines) < 16: continue
 
-                # تقسيم البيانات: 8 شموع قديمة و 8 حديثة
-                old_klines = klines[:8]
-                new_klines = klines[8:]
-
-                # حساب متوسط حجم التداول
+                old_klines, new_klines = klines[:8], klines[8:]
                 old_volume = sum(float(k[5]) for k in old_klines) / 8 if old_klines else 0
                 new_volume = sum(float(k[5]) for k in new_klines) / 8 if new_klines else 0
-                
-                # حساب تغير السعر
-                start_price = float(new_klines[0][1]) # سعر الافتتاح لأول شمعة حديثة
-                end_price = float(new_klines[-1][4])  # سعر الإغلاق لآخر شمعة حديثة
-                
+                start_price, end_price = float(new_klines[0][1]), float(new_klines[-1][4])
                 if start_price == 0: continue
                 price_change = ((end_price - start_price) / start_price) * 100
-
-                # تطبيق فلاتر الزخم
                 if new_volume > old_volume * MOMENTUM_VOLUME_INCREASE and price_change > MOMENTUM_PRICE_INCREASE:
-                    momentum_coins.append({
-                        'symbol': symbol,
-                        'price_change': price_change,
-                        'current_price': end_price
-                    })
-                time.sleep(0.1) # لتجنب إغراق الـ API بالطلبات
-            except Exception:
-                continue
+                    momentum_coins.append({'symbol': symbol, 'price_change': price_change, 'current_price': end_price})
+                time.sleep(0.1)
+            except Exception: continue
 
         if not momentum_coins:
-            context.bot.send_message(chat_id=chat_id, text="🚀 لم تنجح أي عملة في اختبار الزخم. السوق هادئ حالياً."); return
+            context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="🚀 لم تنجح أي عملة في اختبار الزخم. السوق هادئ حالياً."); return
             
-        # فرز النتائج حسب أقوى صعود حديث
         sorted_coins = sorted(momentum_coins, key=lambda x: x['price_change'], reverse=True)
-        
-        message = f"🚀 **تقرير كاشف الزخم - {datetime.now().strftime('%H:%M')}** 🚀\n\n"
-        message += "قائمة عملات تظهر بداية زخم سعري وسيولة متزايدة:\n\n"
-        
+        message = f"🚀 **تقرير كاشف الزخم - {datetime.now().strftime('%H:%M')}** 🚀\n\nقائمة عملات تظهر بداية زخم سعري وسيولة متزايدة:\n\n"
         for i, coin in enumerate(sorted_coins[:10]):
-            symbol_name = coin['symbol'].replace('USDT', '')
-            price_str = format_price(coin['current_price'])
-            message += f"**{i+1}. ${symbol_name}**\n"
-            message += f"   - السعر الحالي: `${price_str}`\n"
-            message += f"   - **صعود آخر ساعتين: `%{coin['price_change']:+.2f}`**\n\n"
-            
-        context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
+            symbol_name = coin['symbol'].replace('USDT', ''); price_str = format_price(coin['current_price'])
+            message += f"**{i+1}. ${symbol_name}**\n   - السعر الحالي: `${price_str}`\n   - **صعود آخر ساعتين: `%{coin['price_change']:+.2f}`**\n\n"
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
         logger.error(f"Error in send_momentum_detector_report: {e}")
-        context.bot.send_message(chat_id=chat_id, text="حدث خطأ فني أثناء تشغيل كاشف الزخم.")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ فني أثناء تشغيل كاشف الزخم.")
 
-# (بقية دوال الأزرار تبقى كما هي)
 def get_top_10_gainers(context, chat_id):
+    sent_message = context.bot.send_message(chat_id=chat_id, text="🔍 جارِ جلب بيانات الأكثر ارتفاعاً...")
     try:
         data = get_market_data(); usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
         for pair in usdt_pairs: pair['priceChangePercent_float'] = float(pair['priceChangePercent']) * 100
@@ -178,9 +158,11 @@ def get_top_10_gainers(context, chat_id):
         message = "🔥 **أكثر 10 عملات ارتفاعاً في آخر 24 ساعة** 🔥\n\n"
         for i, pair in enumerate(sorted_pairs[:10]):
             message += f"{i+1}. **${pair['symbol'].replace('USDT', '')}**\n   - نسبة الارتفاع: `%{pair['priceChangePercent_float']:+.2f}`\n   - السعر الحالي: `${format_price(pair['lastPrice'])}`\n\n"
-        context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e: logger.error(f"Error in get_top_10_gainers: {e}"); context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء جلب البيانات.")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e: logger.error(f"Error in get_top_10_gainers: {e}"); context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text="حدث خطأ أثناء جلب البيانات.")
+
 def get_top_10_losers(context, chat_id):
+    sent_message = context.bot.send_message(chat_id=chat_id, text="🔍 جارِ جلب بيانات الأكثر انخفاضاً...")
     try:
         data = get_market_data(); usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
         for pair in usdt_pairs: pair['priceChangePercent_float'] = float(pair['priceChangePercent']) * 100
@@ -188,9 +170,11 @@ def get_top_10_losers(context, chat_id):
         message = "📉 **أكثر 10 عملات انخفاضاً في آخر 24 ساعة** 📉\n\n"
         for i, pair in enumerate(sorted_pairs[:10]):
             message += f"{i+1}. **${pair['symbol'].replace('USDT', '')}**\n   - نسبة الانخفاض: `%{pair['priceChangePercent_float']:+.2f}`\n   - السعر الحالي: `${format_price(pair['lastPrice'])}`\n\n"
-        context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e: logger.error(f"Error in get_top_10_losers: {e}"); context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء جلب البيانات.")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e: logger.error(f"Error in get_top_10_losers: {e}"); context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text="حدث خطأ أثناء جلب البيانات.")
+
 def get_top_10_volume(context, chat_id):
+    sent_message = context.bot.send_message(chat_id=chat_id, text="🔍 جارِ جلب بيانات الأعلى سيولة...")
     try:
         data = get_market_data(); usdt_pairs = [s for s in data if s['symbol'].endswith('USDT')]
         for pair in usdt_pairs: pair['quoteVolume_float'] = float(pair['quoteVolume'])
@@ -198,11 +182,24 @@ def get_top_10_volume(context, chat_id):
         message = "💰 **أكثر 10 عملات سيولة (فوليوم) في آخر 24 ساعة** 💰\n\n"
         for i, pair in enumerate(sorted_pairs[:10]):
             message += f"{i+1}. **${pair['symbol'].replace('USDT', '')}**\n   - حجم التداول: `${pair['quoteVolume_float']:,.0f}`\n   - السعر الحالي: `${format_price(pair['lastPrice'])}`\n\n"
-        context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e: logger.error(f"Error in get_top_10_volume: {e}"); context.bot.send_message(chat_id=chat_id, text="حدث خطأ أثناء جلب البيانات.")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e: logger.error(f"Error in get_top_10_volume: {e}"); context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text="حدث خطأ أثناء جلب البيانات.")
 
 # (بقية المهام الآلية لا تحتاج لتغيير)
 # =============================================================================
+def new_listings_sniper_job():
+    global known_symbols; logger.info("Sniper: Checking for new listings...")
+    try:
+        current_symbols = {s['symbol'] for s in get_market_data() if s['symbol'].endswith('USDT')}
+        if not known_symbols: known_symbols = current_symbols; logger.info(f"Sniper: Initialized with {len(known_symbols)} symbols."); return
+        newly_listed = current_symbols - known_symbols
+        if newly_listed:
+            for symbol in newly_listed:
+                logger.info(f"Sniper: NEW LISTING DETECTED: {symbol}")
+                message = f"🎯 **تنبيه قناص: إدراج جديد!** 🎯\n\nتم للتو إدراج عملة جديدة على منصة MEXC:\n\n**العملة:** `${symbol}`\n\n*(مخاطر عالية! قم ببحثك بسرعة فائقة.)*"
+                bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+            known_symbols.update(newly_listed)
+    except Exception as e: logger.error(f"Sniper: Error checking for new listings: {e}")
 def pattern_hunter_job():
     global pattern_tracker, recently_alerted_pattern; logger.info("Pattern Hunter: Starting scan...")
     now = datetime.now(UTC)
@@ -227,19 +224,6 @@ def pattern_hunter_job():
                 bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
                 recently_alerted_pattern[symbol] = now
     except Exception as e: logger.error(f"Pattern Hunter: Error during scan: {e}")
-def new_listings_sniper_job():
-    global known_symbols; logger.info("Sniper: Checking for new listings...")
-    try:
-        current_symbols = {s['symbol'] for s in get_market_data() if s['symbol'].endswith('USDT')}
-        if not known_symbols: known_symbols = current_symbols; logger.info(f"Sniper: Initialized with {len(known_symbols)} symbols."); return
-        newly_listed = current_symbols - known_symbols
-        if newly_listed:
-            for symbol in newly_listed:
-                logger.info(f"Sniper: NEW LISTING DETECTED: {symbol}")
-                message = f"🎯 **تنبيه قناص: إدراج جديد!** 🎯\n\nتم للتو إدراج عملة جديدة على منصة MEXC:\n\n**العملة:** `${symbol}`\n\n*(مخاطر عالية! قم ببحثك بسرعة فائقة.)*"
-                bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
-            known_symbols.update(newly_listed)
-    except Exception as e: logger.error(f"Sniper: Error checking for new listings: {e}")
 def fomo_hunter_job():
     logger.info("===== Fomo Hunter: Starting Scan ====="); now = datetime.now(UTC)
     for symbol, timestamp in list(recently_alerted_fomo.items()):
@@ -273,7 +257,6 @@ def analyze_symbol(symbol): # Helper for fomo_hunter_job
         volume_increase_percent = ((current_day_volume - previous_day_volume) / previous_day_volume) * 100 if previous_day_volume > 0 else float('inf')
         return {'symbol': symbol, 'volume_increase': f"+{volume_increase_percent:,.2f}%", 'price_pattern': f"صعود بنسبة +{price_increase_percent:,.2f}% في آخر 4 ساعات", 'current_price': format_price(current_price)}
     except Exception: return None
-
 # =============================================================================
 # تشغيل البوت والجدولة
 # =============================================================================
