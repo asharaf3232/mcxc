@@ -76,47 +76,47 @@ market_data_cache = {'data': None, 'timestamp': datetime.min}
 # =============================================================================
 # 1. قسم الشبكة والوظائف الأساسية (Async)
 # =============================================================================
-# --- START MODIFIED FUNCTION (v13.2) ---
+# --- START MODIFIED FUNCTION (v13.3 Diagnostic) ---
 async def fetch_json(session: aiohttp.ClientSession, url: str):
-    """Fetches JSON from a given URL. The URL must be complete with query string."""
+    """
+    Fetches JSON from a URL. If it fails, it returns a dictionary 
+    with a precise error message for diagnostics.
+    """
     try:
+        logger.info(f"Attempting to fetch: {url}")
         async with session.get(url, timeout=HTTP_TIMEOUT, headers={'User-Agent': 'Mozilla/5.0'}) as response:
-            response.raise_for_status()
+            response.raise_for_status() # Will raise an exception for 4xx/5xx status
             logger.info(f"Successfully fetched {response.url} with status {response.status}")
             return await response.json()
     except Exception as e:
-        logger.error(f"Error fetching {url}: {e}")
-        return None
+        # Capture the specific error message to display to the user
+        error_message = f"Type={type(e).__name__}, Msg={str(e)}"
+        logger.error(f"CRITICAL FETCH ERROR for {url}: {error_message}")
+        return {"__error__": error_message}
 # --- END MODIFIED FUNCTION ---
 
 async def get_market_data(session: aiohttp.ClientSession, force_refresh: bool = False):
     now = datetime.now()
     if force_refresh or not market_data_cache['data'] or (now - market_data_cache['timestamp']) > timedelta(minutes=1):
-        # This call has no parameters, so it always worked
         data = await fetch_json(session, f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr")
-        if data:
+        if data and "__error__" not in data:
             market_data_cache['data'] = {item['symbol']: item for item in data}
             market_data_cache['timestamp'] = now
     return market_data_cache['data']
 
-# --- START MODIFIED FUNCTION (v13.2) ---
 async def get_klines(session: aiohttp.ClientSession, symbol: str, interval: str, limit: int):
-    """Manually builds the query string to bypass potential issues with the 'params' dict."""
     params = {'symbol': symbol, 'interval': interval, 'limit': limit}
     query_string = urllib.parse.urlencode(params)
     full_url = f"{MEXC_API_BASE_URL}/api/v3/klines?{query_string}"
-    logger.info(f"Fetching klines from URL: {full_url}")
     return await fetch_json(session, full_url)
-# --- END MODIFIED FUNCTION ---
 
-# --- START MODIFIED FUNCTION (v13.2) ---
 async def get_current_price(session: aiohttp.ClientSession, symbol: str) -> float | None:
-    """Manually builds the query string for fetching the price."""
     query_string = urllib.parse.urlencode({'symbol': symbol})
     full_url = f"{MEXC_API_BASE_URL}/api/v3/ticker/price?{query_string}"
     data = await fetch_json(session, full_url)
-    return float(data['price']) if data and 'price' in data else None
-# --- END MODIFIED FUNCTION ---
+    if data and "__error__" not in data and 'price' in data:
+        return float(data['price'])
+    return None
 
 def format_price(price_str):
     try:
@@ -130,7 +130,7 @@ def format_price(price_str):
         return str(price_str)
 
 # =============================================================================
-# 2. قسم الرصد اللحظي (WebSocket)
+# 2. قسم الرصد اللحظي (WebSocket) - No Changes
 # =============================================================================
 async def handle_websocket_message(message):
     try:
@@ -206,7 +206,7 @@ def send_instant_alert(symbol, total_volume, trade_count):
         logger.error(f"Failed to send instant alert for {symbol}: {e}")
 
 # =============================================================================
-# 3. الوظائف التفاعلية (أوامر البوت)
+# 3. الوظائف التفاعلية (أوامر البوت) - No Changes
 # =============================================================================
 BTN_MOMENTUM = "🚀 كاشف الزخم (فائق السرعة)"
 BTN_GAINERS = "📈 الأكثر ارتفاعاً"
@@ -220,11 +220,10 @@ def build_menu():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def start_command(update: Update, context: CallbackContext):
-    msg = ("✅ **بوت التداول الذكي (v13.2) جاهز!**\n\n"
-           "**تحسينات رئيسية:**\n"
-           "- تم تطبيق إصلاح جذري لمشكلة `فشل التحليل الفني`. يجب أن تعمل الآن مع جميع العملات.\n"
-           "- أرسل رمز أي عملة (مثلاً `BTC`) لتحصل على تقرير دقيق وموثوق.\n\n"
-           "جميع الأزرار والوظائف تعمل الآن.")
+    msg = ("✅ **بوت التداول الذكي (v13.3 - تشخيصي)**\n\n"
+           "**ملاحظة هامة:**\n"
+           "هذا الإصدار مخصص لتشخيص مشكلة فشل التحليل. عند طلب تقرير لعملة، سيتم عرض **رسالة الخطأ التقنية** إذا فشل الاتصال.\n\n"
+           "**الرجاء إرسال رمز `BTC` ثم إرسال صورة من الرد إلينا.**")
     update.message.reply_text(msg, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
 
 def status_command(update: Update, context: CallbackContext):
@@ -329,7 +328,7 @@ async def run_momentum_detector(context, chat_id, msg_id, session):
         add_to_monitoring(coin['sym'], float(coin['pr']), 0, now, "الزخم اليدوي")
 
 # =============================================================================
-# 4. ميزة المدقق (The Verifier) - نسخة مطورة V13.2
+# 4. ميزة المدقق (The Verifier) - نسخة مطورة V13.3 Diagnostic
 # =============================================================================
 def verifier_command_handler(update: Update, context: CallbackContext):
     symbol = update.message.text.strip().upper()
@@ -371,22 +370,27 @@ def calculate_rsi(prices: list, period: int = 14):
     deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
     gains = [d for d in deltas if d > 0]
     losses = [-d for d in deltas if d < 0]
-    if not losses: return 100.0 # Prevent division by zero if all gains
+    if not losses: return 100.0
     avg_gain = sum(gains[-period:]) / period if gains else 0
-    avg_loss = sum(losses[-period:]) / period if losses else 1 # Prevent division by zero
+    avg_loss = sum(losses[-period:]) / period if losses else 1
     if avg_loss == 0: return 100.0
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
+# --- START MODIFIED FUNCTION (v13.3 Diagnostic) ---
 async def analyze_technical_data(session, symbol_usdt):
-    """Slightly modified version from v13.1 for flexibility"""
-    try:
-        klines = await get_klines(session, symbol_usdt, '1h', 100)
-        
-        if not klines or len(klines) < 10:
-            logger.warning(f"Not enough kline data for {symbol_usdt} to analyze (got {len(klines) if klines else 0}).")
-            return None
+    """Passes through the specific error from fetch_json if it occurs."""
+    klines = await get_klines(session, symbol_usdt, '1h', 100)
+    
+    # If get_klines returned an error dictionary, pass it through
+    if isinstance(klines, dict) and "__error__" in klines:
+        return klines
+    
+    if not klines or len(klines) < 10:
+        logger.warning(f"Not enough kline data for {symbol_usdt} to analyze (got {len(klines) if klines else 0}).")
+        return None
 
+    try:
         closes = [float(k[4]) for k in klines]
         results = {'trend': 'غير محدد', 'rsi': None, 'basis': 'بيانات غير كافية للاتجاه'}
 
@@ -405,33 +409,33 @@ async def analyze_technical_data(session, symbol_usdt):
             sma = sum(closes[-10:]) / 10
             results['trend'] = "صاعد" if closes[-1] > sma else "هابط"
             results['basis'] = "متوسط 10 ساعات (قصير)"
-
+        
         return results
     except Exception as e:
-        logger.error(f"Error during TA for {symbol_usdt}: {e}")
+        logger.error(f"Error during TA calculation for {symbol_usdt}: {e}")
         return None
+# --- END MODIFIED FUNCTION ---
 
-# --- START MODIFIED FUNCTION (v13.2) ---
 async def get_coingecko_data(session, base_symbol):
-    """Manually builds query strings to bypass potential issues with the 'params' dict."""
-    try:
-        query_string = urllib.parse.urlencode({'query': base_symbol})
-        search_url = f"{COINGECKO_API_BASE_URL}/search?{query_string}"
-        logger.info(f"Fetching coin search from URL: {search_url}")
-        search_results = await fetch_json(session, search_url)
+    query_string = urllib.parse.urlencode({'query': base_symbol})
+    search_url = f"{COINGECKO_API_BASE_URL}/search?{query_string}"
+    search_results = await fetch_json(session, search_url)
 
-        if not search_results or not search_results.get('coins'):
-            logger.warning(f"CoinGecko search for '{base_symbol}' returned no results.")
-            return None
+    if not search_results or "__error__" in search_results:
+        return search_results # Pass error through
         
+    if not search_results.get('coins'):
+        logger.warning(f"CoinGecko search for '{base_symbol}' returned no results.")
+        return None
+    
+    try:
         coin_id = next((coin['id'] for coin in search_results['coins'] if coin['symbol'].upper() == base_symbol), search_results['coins'][0]['id'])
-
         coin_data_url = f"{COINGECKO_API_BASE_URL}/coins/{coin_id}?localization=false&tickers=false&market_data=false&sparkline=false"
-        logger.info(f"Fetching coin data from URL: {coin_data_url}")
         coin_data = await fetch_json(session, coin_data_url)
 
-        if not coin_data: return None
-        
+        if not coin_data or "__error__" in coin_data:
+            return coin_data # Pass error through
+
         desc_raw = coin_data.get('description', {}).get('en', 'No description available.')
         desc = re.sub('<[^<]+?>', '', desc_raw).split('. ')[0]
 
@@ -443,10 +447,10 @@ async def get_coingecko_data(session, base_symbol):
             'tg': links.get('telegram_channel_identifier', '')
         }
     except Exception as e:
-        logger.error(f"Error fetching coingecko data for {base_symbol}: {e}")
+        logger.error(f"Error processing coingecko data for {base_symbol}: {e}")
         return None
-# --- END MODIFIED FUNCTION ---
 
+# --- START MODIFIED FUNCTION (v13.3 Diagnostic) ---
 async def format_verifier_report(base_symbol, mexc, tech, cg):
     report = f"🕵️‍♂️ **تقرير المدقق لعملة: ${base_symbol}** 🕵️‍♂️\n\n"
     report += "--- (1) **بيانات السوق (MEXC)** ---\n"
@@ -454,8 +458,11 @@ async def format_verifier_report(base_symbol, mexc, tech, cg):
     report += f"  - التغير (24س): `{mexc['change_24h']:+.2f}%` {'🟢' if mexc['change_24h'] >= 0 else '🔴'}\n"
     report += f"  - الحجم (24س): `${mexc['volume_24h']:,.0f}`\n\n"
     
-    report += "--- (2) **تحليل فني (ساعة)** ---\n"
-    if tech:
+    report += "--- (2) **تحليل فني (ساعة) (تشخيصي)** ---\n"
+    if isinstance(tech, dict) and "__error__" in tech:
+        report += f"  - **حدث خطأ فني أثناء جلب البيانات:**\n"
+        report += f"  - ```{tech['__error__']}```\n\n"
+    elif tech:
         report += f"  - الاتجاه: `{tech.get('trend', 'N/A')}` ({tech.get('basis', 'N/A')}).\n"
         if tech.get('rsi') is not None:
             rsi = tech['rsi']
@@ -464,10 +471,13 @@ async def format_verifier_report(base_symbol, mexc, tech, cg):
         else:
             report += "  - الزخم (RSI): `بيانات غير كافية`.\n\n"
     else: 
-        report += "  - تعذر التحليل (فشل في جلب بيانات الشموع).\n\n"
+        report += "  - تعذر التحليل (بيانات الشموع غير كافية).\n\n"
         
-    report += "--- (3) **هوية المشروع (CoinGecko)** ---\n"
-    if cg:
+    report += "--- (3) **هوية المشروع (CoinGecko) (تشخيصي)** ---\n"
+    if isinstance(cg, dict) and "__error__" in cg:
+        report += f"  - **حدث خطأ فني أثناء جلب البيانات:**\n"
+        report += f"  - ```{cg['__error__']}```\n\n"
+    elif cg:
         report += f"  - الوصف: {cg.get('desc', 'N/A')}\n"
         if cg.get('web'): report += f"  - الموقع: [اضغط هنا]({cg['web']})\n"
         if cg.get('x'): report += f"  - تويتر (X): [اضغط هنا]({cg['x']})\n"
@@ -479,29 +489,30 @@ async def format_verifier_report(base_symbol, mexc, tech, cg):
     s, w = [], []
     if mexc['volume_24h'] > 1000000: s.append("حجم تداول قوي")
     
-    if tech:
-        if tech['trend'] == 'صاعد': 
-            s.append(f"اتجاه صاعد ({tech['basis']})")
-        elif tech['trend'] == 'هابط':
-            w.append(f"اتجاه هابط ({tech['basis']})")
-        
+    if isinstance(tech, dict) and "__error__" in tech:
+        w.append("فشل الاتصال بالـ API")
+    elif tech:
+        if tech['trend'] == 'صاعد': s.append(f"اتجاه صاعد ({tech['basis']})")
+        elif tech['trend'] == 'هابط': w.append(f"اتجاه هابط ({tech['basis']})")
         if tech.get('rsi') is not None:
             rsi = tech['rsi']
-            if rsi > 70: 
-                w.append(f"RSI مرتفع ({rsi:.0f})")
-            elif rsi < 30:
-                s.append(f"RSI منخفض ({rsi:.0f})")
-    else: 
+            if rsi > 70: w.append(f"RSI مرتفع ({rsi:.0f})")
+            elif rsi < 30: s.append(f"RSI منخفض ({rsi:.0f})")
+    else:
         w.append("فشل التحليل الفني")
         
-    if not cg: w.append("مشروع غير معروف")
+    if isinstance(cg, dict) and "__error__" in cg:
+        w.append("فشل الاتصال بـ CoinGecko")
+    elif not cg:
+        w.append("مشروع غير معروف")
     
     report += f"  - نقاط القوة: {', '.join(s) if s else 'لا توجد نقاط قوة واضحة'}.\n"
     report += f"  - نقاط الضعف: {', '.join(w) if w else 'لا توجد نقاط ضعف واضحة'}.\n"
     return report
+# --- END MODIFIED FUNCTION ---
 
 # =============================================================================
-# 5. المهام الآلية الدورية
+# 5. المهام الآلية الدورية - No changes
 # =============================================================================
 def add_to_monitoring(symbol, alert_price, peak_volume, alert_time, source):
     if symbol not in active_hunts:
@@ -683,7 +694,7 @@ async def get_performance_report(context, chat_id, msg_id, session):
 # =============================================================================
 def send_startup_message():
     try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت التداول (v13.2) متصل!**", parse_mode=ParseMode.MARKDOWN)
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت التداول (v13.3 - تشخيصي) متصل!**", parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent.")
     except Exception as e:
         logger.error(f"Failed to send startup message: {e}")
