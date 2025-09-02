@@ -97,7 +97,7 @@ def format_price(price_str):
     try:
         return f"{float(price_str):.8g}"
     except (ValueError, TypeError):
-        return price_str
+        return str(price_str)
 
 # =============================================================================
 # 2. قسم الرصد اللحظي (WebSocket)
@@ -141,8 +141,12 @@ async def periodic_activity_checker():
     while True:
         await asyncio.sleep(5)
         now_ts = datetime.now(UTC).timestamp()
-        recently_alerted_instant.clear()
         
+        # Clear old alerts to allow re-alerting after cooldown
+        for sym in list(recently_alerted_instant.keys()):
+            if now_ts - recently_alerted_instant[sym] > COOLDOWN_PERIOD_HOURS * 3600:
+                del recently_alerted_instant[sym]
+
         symbols_to_check = list(activity_tracker.keys())
         async with activity_lock:
             for symbol in symbols_to_check:
@@ -151,7 +155,7 @@ async def periodic_activity_checker():
                 while trades and now_ts - trades[0]['t'] > INSTANT_TIMEFRAME_SECONDS:
                     trades.popleft()
                 if not trades:
-                    del activity_tracker[symbol]
+                    if symbol in activity_tracker: del activity_tracker[symbol]
                     continue
 
                 total_volume = sum(trade['v'] for trade in trades)
@@ -162,7 +166,7 @@ async def periodic_activity_checker():
                     symbol not in recently_alerted_instant):
                     send_instant_alert(symbol, total_volume, trade_count)
                     recently_alerted_instant[symbol] = now_ts
-                    del activity_tracker[symbol]
+                    if symbol in activity_tracker: del activity_tracker[symbol]
 
 def send_instant_alert(symbol, total_volume, trade_count):
     message = (f"⚡️ **رصد نشاط شراء مفاجئ! (لحظي)** ⚡️\n\n"
@@ -191,7 +195,7 @@ def build_menu():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def start_command(update: Update, context: CallbackContext):
-    msg = ("✅ **بوت التداول الذكي (v11.1) جاهز!**\n\n"
+    msg = ("✅ **بوت التداول الذكي (v11.2) جاهز!**\n\n"
            "**ميزة جديدة:** أرسل رمز أي عملة (مثلاً `BTC`) لتحصل على تقرير فني ومعلوماتي فوري عنها.\n\n"
            "استخدم الأزرار أدناه للوصول إلى الوظائف الأخرى.")
     update.message.reply_text(msg, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
@@ -353,8 +357,7 @@ async def get_coingecko_data(session, base_symbol):
     try:
         search = await fetch_json(session, f"{COINGECKO_API_BASE_URL}/search", {'query': base_symbol})
         if not search or not search.get('coins'): return None
-        coin_id = next((c['id'] for c in search['coins'] if c['symbol'].upper() == base_symbol), None)
-        if not coin_id: coin_id = search['coins'][0]['id']
+        coin_id = next((c['id'] for c in search['coins'] if c['symbol'].upper() == base_symbol), search['coins'][0]['id'])
 
         data = await fetch_json(session, f"{COINGECKO_API_BASE_URL}/coins/{coin_id}")
         if not data: return None
@@ -534,7 +537,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
                 logger.info(f"PERFORMANCE TRACKING ARCHIVED for {symbol}.")
                 continue
             if data['status'] == 'Archived':
-                del performance_tracker[symbol]
+                if symbol in performance_tracker: del performance_tracker[symbol]
                 continue
             
             price = await get_current_price(session, symbol)
@@ -563,7 +566,11 @@ async def get_performance_report(context, chat_id, msg_id, session):
             curr_chg = ((current_p - alert_p) / alert_p) * 100 if alert_p > 0 else 0
             peak_chg = ((high_p - alert_p) / alert_p) * 100 if alert_p > 0 else 0
             
-            time_str = f"{(datetime.now(UTC) - data['alert_time']).total_seconds() / 3600:.1f} س"
+            time_since_alert = datetime.now(UTC) - data['alert_time']
+            hours, remainder = divmod(time_since_alert.total_seconds(), 3600)
+            minutes, _ = divmod(remainder, 60)
+            time_str = f"{int(hours)} س و {int(minutes)} د"
+
             msg += (f"{'🟢' if curr_chg >= 0 else '🔴'} **${symbol.replace('USDT','')}** (منذ {time_str})\n"
                     f"   - سعر التنبيه: `${format_price(alert_p)}`\n"
                     f"   - الحالي: `${format_price(current_p)}` (**{curr_chg:+.2f}%**)\n"
@@ -578,7 +585,7 @@ async def get_performance_report(context, chat_id, msg_id, session):
 # =============================================================================
 def send_startup_message():
     try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت التداول (v11.1) متصل!**", parse_mode=ParseMode.MARKDOWN)
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت التداول (v11.2) متصل!**", parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent.")
     except Exception as e:
         logger.error(f"Failed to send startup message: {e}")
@@ -593,9 +600,16 @@ async def main():
         loop = asyncio.get_running_loop()
         dp.bot_data.update({'loop': loop, 'session': session})
 
+        # --- Handlers ---
         dp.add_handler(CommandHandler("start", start_command))
         dp.add_handler(MessageHandler(Filters.regex(re.compile(r'^[A-Z0-9]{2,10}$', re.IGNORECASE)), verifier_command_handler))
-        dp.add_handler(MessageHandler(Filters.text(list(vars().keys())), handle_button_press))
+        
+        # THIS IS THE FIX: Correctly list the button texts for the filter
+        button_texts = [
+            BTN_MOMENTUM, BTN_GAINERS, BTN_LOSERS, BTN_VOLUME,
+            BTN_STATUS, BTN_PERFORMANCE
+        ]
+        dp.add_handler(MessageHandler(Filters.text(button_texts), handle_button_press))
 
         tasks = [
             run_websocket_client(),
