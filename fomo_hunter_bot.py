@@ -155,9 +155,9 @@ def button_handler(update, context):
 def get_top_10_list(context, chat_id, list_type):
     """دالة موحدة لجلب قوائم الأكثر ارتفاعاً، انخفاضاً، وسيولة."""
     type_map = {
-        'gainers': {'key': 'priceChangePercent', 'title': '🔥 الأكثر ارتفاعاً', 'reverse': True, 'prefix': '%', 'suffix': ''},
-        'losers': {'key': 'priceChangePercent', 'title': '📉 الأكثر انخفاضاً', 'reverse': False, 'prefix': '%', 'suffix': ''},
-        'volume': {'key': 'quoteVolume', 'title': '💰 الأعلى سيولة', 'reverse': True, 'prefix': '$', 'suffix': ''}
+        'gainers': {'key': 'priceChangePercent', 'title': '🔥 الأكثر ارتفاعاً', 'reverse': True, 'prefix': '%'},
+        'losers': {'key': 'priceChangePercent', 'title': '📉 الأكثر انخفاضاً', 'reverse': False, 'prefix': '%'},
+        'volume': {'key': 'quoteVolume', 'title': '💰 الأعلى سيولة', 'reverse': True, 'prefix': '$'}
     }
     config = type_map[list_type]
     
@@ -183,19 +183,11 @@ def get_top_10_list(context, chat_id, list_type):
         logger.error(f"Error in get_top_10_list for {list_type}: {e}")
         context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text="حدث خطأ أثناء جلب البيانات.")
 
-### =============================================================================
-### ===== الدالة اليدوية التي تم تعديلها لتصبح سريعة (التغيير هنا) =====
-### =============================================================================
 def send_momentum_detector_report(context, chat_id, message_id):
-    """
-    (النسخة المطورة والسريعة)
-    تفحص فقط قائمة مختصرة من العملات الواعدة لتقديم تقرير شبه فوري.
-    """
     initial_text = "🚀 **كاشف الزخم (النسخة السريعة)**\n\n🔍 جارِ فلترة السوق وتحديد الأهداف الواعدة..."
     context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text, parse_mode=ParseMode.MARKDOWN)
         
     try:
-        # --- الخطوة 1: الفلترة الأولية السريعة ---
         market_data = get_market_data()
         usdt_pairs = [s for s in market_data if s['symbol'].endswith('USDT')]
         for pair in usdt_pairs: pair['priceChangePercent_float'] = float(pair['priceChangePercent']) * 100
@@ -205,7 +197,6 @@ def send_momentum_detector_report(context, chat_id, message_id):
             context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="لم يتم العثور على عملات نشطة للفحص. حاول لاحقاً.")
             return
 
-        # --- الخطوة 2: التحليل العميق والمركز ---
         momentum_coins = []
         for i, pair_data in enumerate(potential_coins):
             if (i + 1) % 25 == 0:
@@ -363,6 +354,16 @@ def pattern_hunter_job():
 # =============================================================================
 # تشغيل البوت والجدولة
 # =============================================================================
+### ===== تم نقل دالة بدء التشغيل هنا لتكون معرّفة قبل استدعائها =====
+def send_startup_message():
+    """يرسل رسالة تأكيدية عند بدء تشغيل البوت."""
+    try:
+        message = "✅ **بوت التداول الذكي متصل الآن!**\n\nأرسل /start لعرض قائمة التحليل الفوري."
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+        logger.info("تم إرسال رسالة بدء التشغيل بنجاح.")
+    except Exception as e:
+        logger.error(f"Failed to send startup message: {e}")
+
 def run_scheduler():
     logger.info("Scheduler thread started.")
     schedule.every(RUN_FOMO_SCAN_EVERY_MINUTES).minutes.do(fomo_hunter_job)
@@ -370,8 +371,11 @@ def run_scheduler():
     schedule.every(RUN_PATTERN_SCAN_EVERY_HOURS).hours.do(pattern_hunter_job)
     
     # Run jobs once at startup to populate initial data without sending alerts
+    # This helps initialize the 'known_symbols' and 'pattern_tracker'
     threading.Thread(target=new_listings_sniper_job).start()
+    time.sleep(2) # Small delay
     threading.Thread(target=pattern_hunter_job).start()
+    time.sleep(2) # Small delay
     threading.Thread(target=fomo_hunter_job).start()
     
     while True:
@@ -389,8 +393,10 @@ def main():
     dp.add_handler(CommandHandler("start", start_command))
     dp.add_handler(CallbackQueryHandler(button_handler))
     
+    # استدعاء دالة بدء التشغيل بعد التأكد من أنها معرّفة
     send_startup_message()
     
+    # تشغيل المهام المجدولة في خيط منفصل
     scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
     scheduler_thread.start()
     
