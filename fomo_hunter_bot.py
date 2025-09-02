@@ -212,21 +212,28 @@ def send_instant_alert(symbol, total_volume, trade_count):
 # =============================================================================
 # --- 3. Interactive Functions (Bot Commands) ---
 
-BTN_MOMENTUM = "🚀 كاشف الزخم (فائق السرعة)"
+BTN_MOMENTUM = "🚀 كاشف الزخم"
 BTN_GAINERS = "📈 الأكثر ارتفاعاً"
 BTN_LOSERS = "📉 الأكثر انخفاضاً"
 BTN_VOLUME = "💰 الأعلى سيولة"
+BTN_STATUS = "📊 الحالة"
+BTN_PERFORMANCE = "📈 تقرير الأداء"
+
 
 def build_menu():
-    keyboard = [[BTN_MOMENTUM], [BTN_GAINERS, BTN_LOSERS], [BTN_VOLUME]]
+    keyboard = [
+        [BTN_MOMENTUM],
+        [BTN_GAINERS, BTN_LOSERS, BTN_VOLUME],
+        [BTN_STATUS, BTN_PERFORMANCE]
+    ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def start_command(update, context):
-    welcome_message = ("✅ **بوت التداول الذكي (v8) جاهز!**\n\n"
+    welcome_message = ("✅ **بوت التداول الذكي (v9) جاهز!**\n\n"
                        "**ميزة جديدة:** تمت إضافة **متتبع الأداء**!\n"
                        "- بعد كل تنبيه، سيراقب البوت أداء العملة.\n"
-                       "- استخدم الأمر الجديد `/performance` لعرض تقرير الأداء.\n\n"
-                       "- استخدم لوحة الأزرار أدناه للتحليل الفوري.")
+                       "- استخدم زر `📈 تقرير الأداء` لعرض النتائج.\n\n"
+                       "- جميع الأوامر متاحة الآن عبر لوحة الأزرار.")
     update.message.reply_text(welcome_message, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
 
 def status_command(update, context):
@@ -243,20 +250,32 @@ def status_command(update, context):
     update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
 def handle_button_press(update, context):
-    """Handles button presses and schedules async tasks."""
+    """Handles all button presses from the main keyboard."""
     button_text = update.message.text
     chat_id = update.message.chat_id
     loop = context.bot_data['loop']
     session = context.bot_data['session']
+
+    # Handle synchronous commands directly without a "loading" message
+    if button_text == BTN_STATUS:
+        status_command(update, context)
+        return
+
+    # Handle asynchronous commands with a "loading" message
     sent_message = context.bot.send_message(chat_id=chat_id, text="🔍 جارِ تنفيذ طلبك...")
     
-    task_map = {
-        BTN_GAINERS: get_top_10_list(context, chat_id, sent_message.message_id, 'gainers', session),
-        BTN_LOSERS: get_top_10_list(context, chat_id, sent_message.message_id, 'losers', session),
-        BTN_VOLUME: get_top_10_list(context, chat_id, sent_message.message_id, 'volume', session),
-        BTN_MOMENTUM: run_momentum_detector(context, chat_id, sent_message.message_id, session),
-    }
-    task = task_map.get(button_text)
+    task = None
+    if button_text == BTN_GAINERS:
+        task = get_top_10_list(context, chat_id, sent_message.message_id, 'gainers', session)
+    elif button_text == BTN_LOSERS:
+        task = get_top_10_list(context, chat_id, sent_message.message_id, 'losers', session)
+    elif button_text == BTN_VOLUME:
+        task = get_top_10_list(context, chat_id, sent_message.message_id, 'volume', session)
+    elif button_text == BTN_MOMENTUM:
+        task = run_momentum_detector(context, chat_id, sent_message.message_id, session)
+    elif button_text == BTN_PERFORMANCE:
+        task = get_performance_report(context, chat_id, sent_message.message_id, session)
+
     if task:
         asyncio.run_coroutine_threadsafe(task, loop)
 
@@ -336,7 +355,7 @@ async def run_momentum_detector(context, chat_id, message_id, session: aiohttp.C
         message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n"
                     f"   - السعر: `${format_price(coin['current_price'])}`\n"
                     f"   - **زخم آخر 30 دقيقة: `%{coin['price_change']:+.2f}`**\n\n")
-    message += "*(تمت إضافة هذه العملات إلى متتبع الأداء. استخدم /performance للتحقق.)*"
+    message += "*(تمت إضافة هذه العملات إلى متتبع الأداء.)*"
     context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
     now = datetime.now(UTC)
@@ -546,45 +565,54 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
                 if current_price > performance_tracker[symbol]['high_price']:
                     performance_tracker[symbol]['high_price'] = current_price
 
-def performance_command(update, context):
-    """Handles the /performance command by scheduling the async report function."""
-    loop = context.bot_data['loop']
-    session = context.bot_data['session']
-    chat_id = update.message.chat_id
-    asyncio.run_coroutine_threadsafe(get_performance_report(chat_id, session), loop)
-
-async def get_performance_report(chat_id, session):
+async def get_performance_report(context, chat_id, message_id, session: aiohttp.ClientSession):
     """Generates and sends the performance report."""
-    if not performance_tracker:
-        bot.send_message(chat_id=chat_id, text="ℹ️ لا توجد عملات قيد تتبع الأداء حالياً.")
-        return
+    try:
+        if not performance_tracker:
+            context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="ℹ️ لا توجد عملات قيد تتبع الأداء حالياً.")
+            return
 
-    message = "📊 **تقرير أداء العملات المرصودة** 📊\n\n"
-    sorted_symbols = sorted(performance_tracker.items(), key=lambda item: item[1]['alert_time'], reverse=True)
+        # Fetch latest prices for all tracked symbols to ensure the report is up-to-the-second accurate
+        symbols_to_update = [symbol for symbol, data in performance_tracker.items() if data.get('status') == 'Tracking']
+        price_tasks = [get_current_price(session, symbol) for symbol in symbols_to_update]
+        latest_prices = await asyncio.gather(*price_tasks)
 
-    for symbol, data in sorted_symbols:
-        if data['status'] == 'Archived': continue
-        
-        alert_price = data['alert_price']
-        current_price = data['current_price']
-        high_price = data['high_price']
+        for i, symbol in enumerate(symbols_to_update):
+            if latest_prices[i] is not None:
+                performance_tracker[symbol]['current_price'] = latest_prices[i]
+                if latest_prices[i] > performance_tracker[symbol]['high_price']:
+                    performance_tracker[symbol]['high_price'] = latest_prices[i]
 
-        current_change = ((current_price - alert_price) / alert_price) * 100 if alert_price > 0 else 0
-        peak_change = ((high_price - alert_price) / alert_price) * 100 if alert_price > 0 else 0
+        message = "📊 **تقرير أداء العملات المرصودة** 📊\n\n"
+        sorted_symbols = sorted(performance_tracker.items(), key=lambda item: item[1]['alert_time'], reverse=True)
 
-        emoji = "🟢" if current_change >= 0 else "🔴"
-        
-        time_since_alert = datetime.now(UTC) - data['alert_time']
-        hours, remainder = divmod(time_since_alert.total_seconds(), 3600)
-        minutes, _ = divmod(remainder, 60)
-        time_str = f"{int(hours)} س و {int(minutes)} د"
+        for symbol, data in sorted_symbols:
+            if data['status'] == 'Archived': continue
+            
+            alert_price = data['alert_price']
+            current_price = data['current_price']
+            high_price = data['high_price']
 
-        message += (f"{emoji} **${symbol.replace('USDT','')}** (منذ {time_str})\n"
-                    f"   - سعر التنبيه: `${format_price(alert_price)}`\n"
-                    f"   - السعر الحالي: `${format_price(current_price)}` (**{current_change:+.2f}%**)\n"
-                    f"   - أعلى سعر: `${format_price(high_price)}` (**{peak_change:+.2f}%**)\n\n")
+            current_change = ((current_price - alert_price) / alert_price) * 100 if alert_price > 0 else 0
+            peak_change = ((high_price - alert_price) / alert_price) * 100 if alert_price > 0 else 0
 
-    bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.MARKDOWN)
+            emoji = "🟢" if current_change >= 0 else "🔴"
+            
+            time_since_alert = datetime.now(UTC) - data['alert_time']
+            hours, remainder = divmod(time_since_alert.total_seconds(), 3600)
+            minutes, _ = divmod(remainder, 60)
+            time_str = f"{int(hours)} س و {int(minutes)} د"
+
+            message += (f"{emoji} **${symbol.replace('USDT','')}** (منذ {time_str})\n"
+                        f"   - سعر التنبيه: `${format_price(alert_price)}`\n"
+                        f"   - السعر الحالي: `${format_price(current_price)}` (**{current_change:+.2f}%**)\n"
+                        f"   - أعلى سعر: `${format_price(high_price)}` (**{peak_change:+.2f}%**)\n\n")
+
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Error in get_performance_report: {e}")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ أثناء جلب تقرير الأداء.")
+
 
 # =============================================================================
 # 5. تشغيل البوت
@@ -593,7 +621,7 @@ async def get_performance_report(chat_id, session):
 
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v8 - مع متتبع الأداء) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v9 - واجهة تفاعلية) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
@@ -613,9 +641,10 @@ async def main():
         dp.bot_data['session'] = session
 
         dp.add_handler(CommandHandler("start", start_command))
-        dp.add_handler(CommandHandler("status", status_command))
-        dp.add_handler(CommandHandler("performance", performance_command)) # NEW COMMAND
-        dp.add_handler(MessageHandler(Filters.text([BTN_MOMENTUM, BTN_GAINERS, BTN_LOSERS, BTN_VOLUME]), handle_button_press))
+        dp.add_handler(MessageHandler(Filters.text([
+            BTN_MOMENTUM, BTN_GAINERS, BTN_LOSERS, BTN_VOLUME,
+            BTN_STATUS, BTN_PERFORMANCE
+        ]), handle_button_press))
 
         tasks = [
             asyncio.create_task(run_websocket_client()),
@@ -641,3 +670,4 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped manually.")
+
