@@ -229,10 +229,10 @@ def build_menu():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def start_command(update, context):
-    welcome_message = ("✅ **بوت التداول الذكي (v9.1) جاهز!**\n\n"
-                       "**ميزة جديدة:** تمت إضافة **متتبع الأداء**!\n"
-                       "- بعد كل تنبيه، سيراقب البوت أداء العملة.\n"
-                       "- استخدم زر `📈 تقرير الأداء` لعرض النتائج.\n\n"
+    welcome_message = ("✅ **بوت التداول الذكي (v10) جاهز!**\n\n"
+                       "**تحسينات رئيسية:**\n"
+                       "- تم تحسين `تحذير ضعف الزخم` ليصبح أكثر دقة ويتجنب الإنذارات الكاذبة.\n"
+                       "- استخدم زر `📈 تقرير الأداء` لتقييم أداء الإشارات.\n\n"
                        "- جميع الأوامر متاحة الآن عبر لوحة الأزرار.")
     update.message.reply_text(welcome_message, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
 
@@ -500,7 +500,7 @@ async def new_listings_sniper_loop(session: aiohttp.ClientSession):
         await asyncio.sleep(RUN_LISTING_SCAN_EVERY_SECONDS)
 
 async def monitor_active_hunts_loop(session: aiohttp.ClientSession):
-    """Periodically checks monitored symbols for signs of weakness."""
+    """Periodically checks monitored symbols for signs of weakness using a more robust pattern-based approach."""
     logger.info("Active Hunts Monitor background task started.")
     while True:
         await asyncio.sleep(60)
@@ -512,24 +512,32 @@ async def monitor_active_hunts_loop(session: aiohttp.ClientSession):
                 continue
             
             try:
-                klines = await get_klines(session, symbol, '5m', 2)
-                if not klines or len(klines) < 2: continue
+                # Fetch last 3 candles to check for a pattern of weakness
+                klines = await get_klines(session, symbol, '5m', 3)
+                if not klines or len(klines) < 3: continue
                 
                 last_candle = klines[-1]
-                open_price, close_price = float(last_candle[1]), float(last_candle[4])
-                current_volume = float(last_candle[5])
-                
+                prev_candle = klines[-2]
+
+                # Condition 1: Check for two consecutive red candles
+                is_last_red = float(last_candle[4]) < float(last_candle[1])
+                is_prev_red = float(prev_candle[4]) < float(prev_candle[1])
+
                 weakness_reason = None
-                if close_price < open_price and (((close_price - open_price) / open_price) * 100 if open_price > 0 else 0) <= -3.0:
-                    weakness_reason = "شمعة حمراء قوية (5 دقائق)"
-                
-                peak_volume = active_hunts[symbol].get('peak_volume', 0)
-                if peak_volume > 0 and current_volume < (peak_volume * 0.1):
-                    weakness_reason = (weakness_reason + " مع " if weakness_reason else "") + "انخفاض حاد في السيولة"
+                if is_last_red and is_prev_red:
+                    weakness_reason = "شمعتان حمراوان متتاليتان"
+                    
+                    # Condition 2 (Optional confirmation): Check if volume is also declining
+                    last_volume = float(last_candle[5])
+                    prev_volume = float(prev_candle[5])
+                    if last_volume < prev_volume:
+                        weakness_reason += " مع انخفاض في السيولة"
                 
                 if weakness_reason:
-                    send_weakness_alert(symbol, weakness_reason, close_price)
+                    current_price = float(last_candle[4])
+                    send_weakness_alert(symbol, weakness_reason, current_price)
                     del active_hunts[symbol]
+
             except Exception as e:
                 logger.error(f"Error monitoring {symbol}: {e}")
 
