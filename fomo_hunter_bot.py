@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import aiohttp
+import websockets
 from datetime import datetime, timedelta, UTC
 from collections import deque
 from telegram import Bot, ParseMode, ReplyKeyboardMarkup, Update
@@ -103,10 +104,11 @@ async def get_current_price(session: aiohttp.ClientSession, symbol: str) -> floa
 def format_price(price_str):
     try:
         price_float = float(price_str)
+        if price_float == 0: return "0"
         if price_float < 0.001:
             return f"{price_float:.8f}".rstrip('0')
         else:
-            return f"{price_float:.8g}"
+            return f"{price_float:.6g}"
     except (ValueError, TypeError):
         return str(price_str)
 
@@ -201,9 +203,9 @@ def build_menu():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def start_command(update: Update, context: CallbackContext):
-    msg = ("✅ **بوت التداول الذكي (v13) جاهز!**\n\n"
+    msg = ("✅ **بوت التداول الذكي (v13.1) جاهز!**\n\n"
            "**تحسينات رئيسية:**\n"
-           "- تم إصلاح `التحليل الفني` ليصبح أكثر ذكاءً وقدرة على التكيف مع البيانات المتاحة.\n"
+           "- تم إصلاح `التحليل الفني` ليصبح أكثر مرونة وقدرة على تحليل أي عملة بغض النظر عن حجم بياناتها.\n"
            "- أرسل رمز أي عملة (مثلاً `BTC`) لتحصل على تقرير دقيق وموثوق.\n\n"
            "جميع الأزرار والوظائف تعمل الآن.")
     update.message.reply_text(msg, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
@@ -310,7 +312,7 @@ async def run_momentum_detector(context, chat_id, msg_id, session):
         add_to_monitoring(coin['sym'], float(coin['pr']), 0, now, "الزخم اليدوي")
 
 # =============================================================================
-# 4. ميزة المدقق (The Verifier) - نسخة مطورة V13
+# 4. ميزة المدقق (The Verifier) - نسخة مطورة V13.1
 # =============================================================================
 def verifier_command_handler(update: Update, context: CallbackContext):
     symbol = update.message.text.strip().upper()
@@ -358,32 +360,46 @@ def calculate_rsi(prices: list, period: int = 14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
+# --- START MODIFIED FUNCTION ---
 async def analyze_technical_data(session, symbol_usdt):
-    """REBUILT V13: Adaptive technical analysis."""
+    """REBUILT V13.1: More resilient adaptive technical analysis."""
     try:
+        # نطلب 100 شمعة، ولكن سنتعامل مع أي عدد نحصل عليه
         klines = await get_klines(session, symbol_usdt, '1h', 100)
-        if not klines or len(klines) < 15:
+        
+        # الحد الأدنى للتحليل هو 10 شمعات
+        if not klines or len(klines) < 10:
             logger.warning(f"Not enough kline data for {symbol_usdt} to analyze (got {len(klines) if klines else 0}).")
             return None
 
         closes = [float(k[4]) for k in klines]
-        rsi = calculate_rsi(closes, 14)
+        
+        results = {'trend': 'غير محدد', 'rsi': None, 'basis': 'بيانات غير كافية للاتجاه'}
 
-        trend_data = {}
+        # حساب RSI إذا كان ممكناً (يتطلب 15 شمعة على الأقل)
+        if len(closes) >= 15:
+            results['rsi'] = calculate_rsi(closes, 14)
+
+        # تحديد الاتجاه بناءً على البيانات المتاحة
         if len(closes) >= 50:
             sma = sum(closes[-50:]) / 50
-            trend_data = {'trend': "صاعد" if closes[-1] > sma else "هابط", 'basis': "فوق متوسط 50 ساعة"}
+            results['trend'] = "صاعد" if closes[-1] > sma else "هابط"
+            results['basis'] = "متوسط 50 ساعة"
         elif len(closes) >= 20:
             sma = sum(closes[-20:]) / 20
-            trend_data = {'trend': "صاعد" if closes[-1] > sma else "هابط", 'basis': "فوق متوسط 20 ساعة"}
-        else:
-             trend_data = {'trend': 'غير محدد', 'basis': 'بيانات اتجاه غير كافية'}
+            results['trend'] = "صاعد" if closes[-1] > sma else "هابط"
+            results['basis'] = "متوسط 20 ساعة"
+        elif len(closes) >= 10: # حتى لو كانت البيانات قليلة، يمكن تحديد اتجاه قصير المدى
+            sma = sum(closes[-10:]) / 10
+            results['trend'] = "صاعد" if closes[-1] > sma else "هابط"
+            results['basis'] = "متوسط 10 ساعات (قصير)"
 
-        return {'trend': trend_data['trend'], 'rsi': rsi, 'basis': trend_data['basis']}
+        return results
 
     except Exception as e:
         logger.error(f"Error during TA for {symbol_usdt}: {e}")
         return None
+# --- END MODIFIED FUNCTION ---
 
 async def get_coingecko_data(session, base_symbol):
     try:
@@ -409,6 +425,7 @@ async def get_coingecko_data(session, base_symbol):
         logger.error(f"Error fetching coingecko data for {base_symbol}: {e}")
         return None
 
+# --- START MODIFIED FUNCTION ---
 async def format_verifier_report(base_symbol, mexc, tech, cg):
     report = f"🕵️‍♂️ **تقرير المدقق لعملة: ${base_symbol}** 🕵️‍♂️\n\n"
     report += "--- (1) **بيانات السوق (MEXC)** ---\n"
@@ -418,9 +435,14 @@ async def format_verifier_report(base_symbol, mexc, tech, cg):
     
     report += "--- (2) **تحليل فني (ساعة)** ---\n"
     if tech:
-        rsi_level = "مرتفع (تشبع شرائي)" if tech['rsi'] > 70 else "منخفض (تشبع بيعي)" if tech['rsi'] < 30 else "طبيعي"
-        report += f"  - الاتجاه: `{tech['trend']}` ({tech['basis']}).\n"
-        report += f"  - الزخم (RSI): `{tech['rsi']:.1f}` (مستوى `{rsi_level}`).\n\n"
+        report += f"  - الاتجاه: `{tech.get('trend', 'N/A')}` ({tech.get('basis', 'N/A')}).\n"
+        # نضيف سطر الزخم فقط في حال تم حسابه بنجاح
+        if tech.get('rsi') is not None:
+            rsi = tech['rsi']
+            rsi_level = "مرتفع (تشبع شرائي)" if rsi > 70 else "منخفض (تشبع بيعي)" if rsi < 30 else "طبيعي"
+            report += f"  - الزخم (RSI): `{rsi:.1f}` (مستوى `{rsi_level}`).\n\n"
+        else:
+            report += "  - الزخم (RSI): `بيانات غير كافية`.\n\n"
     else: 
         report += "  - تعذر التحليل (بيانات الشموع غير كافية).\n\n"
         
@@ -442,11 +464,13 @@ async def format_verifier_report(base_symbol, mexc, tech, cg):
             s.append(f"اتجاه صاعد ({tech['basis']})")
         elif tech['trend'] == 'هابط':
             w.append(f"اتجاه هابط ({tech['basis']})")
-            
-        if tech['rsi'] > 70: 
-            w.append(f"RSI مرتفع ({tech['rsi']:.0f})")
-        elif tech['rsi'] < 30:
-            s.append(f"RSI منخفض ({tech['rsi']:.0f})")
+        
+        if tech.get('rsi') is not None:
+            rsi = tech['rsi']
+            if rsi > 70: 
+                w.append(f"RSI مرتفع ({rsi:.0f})")
+            elif rsi < 30:
+                s.append(f"RSI منخفض ({rsi:.0f})")
     else: 
         w.append("فشل التحليل الفني")
         
@@ -455,6 +479,7 @@ async def format_verifier_report(base_symbol, mexc, tech, cg):
     report += f"  - نقاط القوة: {', '.join(s) if s else 'لا توجد نقاط قوة واضحة'}.\n"
     report += f"  - نقاط الضعف: {', '.join(w) if w else 'لا توجد نقاط ضعف واضحة'}.\n"
     return report
+# --- END MODIFIED FUNCTION ---
 
 # =============================================================================
 # 5. المهام الآلية الدورية
@@ -639,7 +664,7 @@ async def get_performance_report(context, chat_id, msg_id, session):
 # =============================================================================
 def send_startup_message():
     try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت التداول (v13) متصل!**", parse_mode=ParseMode.MARKDOWN)
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت التداول (v13.1) متصل!**", parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent.")
     except Exception as e:
         logger.error(f"Failed to send startup message: {e}")
