@@ -361,7 +361,8 @@ async def run_momentum_detector(context, chat_id, message_id, session: aiohttp.C
                 momentum_coins.append({
                     'symbol': potential_coins[i]['symbol'],
                     'price_change': price_change,
-                    'current_price': end_price
+                    'current_price': end_price,
+                    'peak_volume': new_volume, # Store the peak volume
                 })
         except (ValueError, IndexError) as e:
             logger.warning(f"Could not process klines for {potential_coins[i]['symbol']}: {e}")
@@ -386,7 +387,8 @@ async def run_momentum_detector(context, chat_id, message_id, session: aiohttp.C
         if symbol not in active_hunts:
              active_hunts[symbol] = {
                 'alert_price': float(coin['current_price']),
-                'alert_time': now
+                'alert_time': now,
+                'peak_volume': coin.get('peak_volume', 0) # Add peak volume
             }
              logger.info(f"MONITORING STARTED for (manual) {symbol}")
 
@@ -438,7 +440,8 @@ async def fomo_hunter_loop(session: aiohttp.ClientSession):
                     if symbol not in active_hunts:
                         active_hunts[symbol] = {
                             'alert_price': float(alert_data['current_price']),
-                            'alert_time': now
+                            'alert_time': now,
+                            'peak_volume': alert_data.get('peak_volume', 0) # Add peak volume
                         }
                         logger.info(f"MONITORING STARTED for (auto) {symbol}")
                     await asyncio.sleep(1) # Small delay to avoid rate limiting
@@ -479,11 +482,16 @@ async def analyze_fomo_symbol(session: aiohttp.ClientSession, symbol: str):
 
         volume_increase_percent = ((current_day_volume - previous_day_volume) / previous_day_volume) * 100 if previous_day_volume > 0 else float('inf')
 
+        # Get the peak volume from the last hourly candle to monitor for weakness
+        last_hour_kline = await get_klines(session, symbol, '1h', 1)
+        peak_volume = float(last_hour_kline[0][5]) if last_hour_kline else 0
+
         return {
             'symbol': symbol,
             'volume_increase': f"+{volume_increase_percent:,.2f}%",
             'price_pattern': f"صعود بنسبة +{price_increase_percent:,.2f}% في آخر 4 ساعات",
-            'current_price': format_price(current_price)
+            'current_price': format_price(current_price),
+            'peak_volume': peak_volume
         }
     except (KeyError, IndexError, ValueError) as e:
         logger.warning(f"Data parsing error during FOMO analysis for {symbol}: {e}")
@@ -532,9 +540,6 @@ async def new_listings_sniper_loop(session: aiohttp.ClientSession):
         
         await asyncio.sleep(RUN_LISTING_SCAN_EVERY_SECONDS)
 
-# Other periodic tasks like 'pattern_hunter' and 'monitor_active_hunts' can be converted similarly.
-# For brevity, I'll add the hunt monitor as it's a key feature.
-
 async def monitor_active_hunts_loop(session: aiohttp.ClientSession):
     """Periodically checks monitored symbols for signs of weakness."""
     logger.info("Active Hunts Monitor background task started.")
@@ -542,9 +547,7 @@ async def monitor_active_hunts_loop(session: aiohttp.ClientSession):
         logger.info(f"Active Hunts Monitor: Checking {len(active_hunts)} active hunt(s)...")
         now = datetime.now(UTC)
         
-        # Create a copy of keys to safely delete from the original dict while iterating
         for symbol in list(active_hunts.keys()):
-            # Timeout check
             if now - active_hunts[symbol]['alert_time'] > timedelta(hours=2):
                 del active_hunts[symbol]
                 logger.info(f"MONITORING STOPPED for {symbol} (timeout).")
@@ -555,13 +558,32 @@ async def monitor_active_hunts_loop(session: aiohttp.ClientSession):
                 if not klines or len(klines) < 2: continue
                 
                 last_candle = klines[-1]
-                open_price, close_price = float(last_candle[1]), float(last_candle[4])
+                open_price = float(last_candle[1])
+                close_price = float(last_candle[4])
+                current_volume = float(last_candle[5])
                 
+                weakness_reason = None
+                
+                # Check 1: Strong red candle
                 if close_price < open_price:
                     price_drop_percent = ((close_price - open_price) / open_price) * 100 if open_price > 0 else 0
                     if price_drop_percent <= -3.0:
-                        send_weakness_alert(symbol, "شمعة حمراء قوية (5 دقائق)", close_price)
-                        del active_hunts[symbol]
+                        weakness_reason = "شمعة حمراء قوية (5 دقائق)"
+                
+                # Check 2: Sharp drop in volume
+                peak_volume = active_hunts[symbol].get('peak_volume', 0)
+                if peak_volume > 0 and current_volume < (peak_volume * 0.1):
+                    # If there was already a reason, append to it. Otherwise, set it.
+                    if weakness_reason:
+                        weakness_reason += " مع انخفاض حاد في السيولة"
+                    else:
+                        weakness_reason = "انخفاض حاد في السيولة"
+                
+                # If any weakness was detected, alert and stop monitoring
+                if weakness_reason:
+                    send_weakness_alert(symbol, weakness_reason, close_price)
+                    del active_hunts[symbol]
+
             except Exception as e:
                 logger.error(f"Error monitoring {symbol}: {e}")
                 
@@ -641,3 +663,4 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped manually.")
+
