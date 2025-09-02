@@ -69,7 +69,6 @@ active_hunts = {}
 performance_tracker = {}
 activity_tracker = {}
 activity_lock = asyncio.Lock()
-# NEW: Cache for market data to avoid repeated API calls and ensure accuracy
 market_data_cache = {'data': None, 'timestamp': datetime.min}
 
 # =============================================================================
@@ -85,7 +84,6 @@ async def fetch_json(session: aiohttp.ClientSession, url: str, params: dict = No
         return None
 
 async def get_market_data(session: aiohttp.ClientSession, force_refresh: bool = False):
-    """Fetches and caches market data to improve performance and accuracy."""
     now = datetime.now()
     if force_refresh or not market_data_cache['data'] or (now - market_data_cache['timestamp']) > timedelta(minutes=1):
         data = await fetch_json(session, f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr")
@@ -103,7 +101,6 @@ async def get_current_price(session: aiohttp.ClientSession, symbol: str) -> floa
     return float(data['price']) if data and 'price' in data else None
 
 def format_price(price_str):
-    """FIXED: Handles scientific notation and formats small numbers properly."""
     try:
         price_float = float(price_str)
         if price_float < 0.001:
@@ -113,7 +110,6 @@ def format_price(price_str):
     except (ValueError, TypeError):
         return str(price_str)
 
-# ... (WebSocket section remains unchanged) ...
 # =============================================================================
 # 2. قسم الرصد اللحظي (WebSocket)
 # =============================================================================
@@ -205,11 +201,11 @@ def build_menu():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def start_command(update: Update, context: CallbackContext):
-    msg = ("✅ **بوت التداول الذكي (v12) جاهز!**\n\n"
+    msg = ("✅ **بوت التداول الذكي (v13) جاهز!**\n\n"
            "**تحسينات رئيسية:**\n"
-           "- تم إصلاح دقة البيانات في `ميزة المدقق` بشكل كامل.\n"
+           "- تم إصلاح `التحليل الفني` ليصبح أكثر ذكاءً وقدرة على التكيف مع البيانات المتاحة.\n"
            "- أرسل رمز أي عملة (مثلاً `BTC`) لتحصل على تقرير دقيق وموثوق.\n\n"
-           "جميع الأزرار تعمل الآن بكفاءة.")
+           "جميع الأزرار والوظائف تعمل الآن.")
     update.message.reply_text(msg, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
 
 def status_command(update: Update, context: CallbackContext):
@@ -267,10 +263,54 @@ async def get_top_10_list(context, chat_id, msg_id, list_type, session):
         logger.error(f"Error in get_top_10_list: {e}")
         context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="حدث خطأ.")
 
-# ... (Momentum detector and other functions remain the same) ...
+async def run_momentum_detector(context, chat_id, msg_id, session):
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="🚀 **كاشف الزخم:** جارِ الفحص...")
+    except Exception: pass
+    
+    market_data = await get_market_data(session)
+    if not market_data:
+        context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="⚠️ تعذر جلب بيانات السوق."); return
+
+    p_coins = [p for s, p in market_data.items() if s.endswith('USDT') and
+               float(p.get('lastPrice','1')) <= MOMENTUM_MAX_PRICE and
+               MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= MOMENTUM_MAX_VOLUME_24H]
+    
+    klines_tasks = [get_klines(session, p['symbol'], MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT) for p in p_coins]
+    all_klines = await asyncio.gather(*klines_tasks)
+    
+    momentum_coins = []
+    for i, klines in enumerate(all_klines):
+        if not klines or len(klines) < MOMENTUM_KLINE_LIMIT: continue
+        try:
+            sp = MOMENTUM_KLINE_LIMIT // 2
+            old_v = sum(float(k[5]) for k in klines[:sp])
+            new_v = sum(float(k[5]) for k in klines[sp:])
+            start_p = float(klines[sp][1])
+            if old_v == 0 or start_p == 0: continue
+            end_p = float(klines[-1][4])
+            price_chg = ((end_p - start_p) / start_p) * 100
+            
+            if new_v > old_v * MOMENTUM_VOLUME_INCREASE and price_chg > MOMENTUM_PRICE_INCREASE:
+                momentum_coins.append({'sym': p_coins[i]['symbol'], 'chg': price_chg, 'pr': end_p})
+        except Exception: continue
+        
+    if not momentum_coins:
+        context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="✅ **الفحص اكتمل:** لا يوجد زخم حقيقي حالياً."); return
+        
+    sorted_coins = sorted(momentum_coins, key=lambda x: x['chg'], reverse=True)
+    msg = f"🚀 **تقرير الزخم الفوري** 🚀\n\n"
+    for i, coin in enumerate(sorted_coins[:10]):
+        msg += (f"**{i+1}. ${coin['sym'].replace('USDT', '')}**\n"
+                f"   - السعر: `${format_price(coin['pr'])}`\n"
+                f"   - **زخم آخر 30 دقيقة: `%{coin['chg']:+.2f}`**\n\n")
+    context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=msg, parse_mode=ParseMode.MARKDOWN)
+    
+    now = datetime.now(UTC)
+    for coin in sorted_coins[:10]:
+        add_to_monitoring(coin['sym'], float(coin['pr']), 0, now, "الزخم اليدوي")
 
 # =============================================================================
-# 4. ميزة المدقق (The Verifier) - نسخة مطورة V12
+# 4. ميزة المدقق (The Verifier) - نسخة مطورة V13
 # =============================================================================
 def verifier_command_handler(update: Update, context: CallbackContext):
     symbol = update.message.text.strip().upper()
@@ -282,8 +322,6 @@ def verifier_command_handler(update: Update, context: CallbackContext):
     asyncio.run_coroutine_threadsafe(task, loop)
 
 async def run_verifier(context, chat_id, msg_id, base_symbol, session):
-    """REBUILT: Verifier V12 - Ensures data accuracy."""
-    # Step 1: Pre-flight check to find the EXACT spot market symbol
     all_market_data = await get_market_data(session, force_refresh=True)
     if not all_market_data:
         context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="⚠️ تعذر الاتصال بالسوق. حاول مرة أخرى."); return
@@ -292,19 +330,16 @@ async def run_verifier(context, chat_id, msg_id, base_symbol, session):
     if exact_symbol not in all_market_data:
         context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=f"لم يتم العثور على زوج التداول الفوري `{exact_symbol}` في MEXC.", parse_mode=ParseMode.MARKDOWN); return
 
-    # Step 2: Now that we have the correct symbol, gather all data
     mexc_data = get_mexc_market_snapshot(all_market_data[exact_symbol])
     tech_task = analyze_technical_data(session, exact_symbol)
     cg_task = get_coingecko_data(session, base_symbol)
     
     tech_data, cg_data = await asyncio.gather(tech_task, cg_task)
 
-    # Step 3: Format and send the report
     report = await format_verifier_report(base_symbol, mexc_data, tech_data, cg_data)
     context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=report, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
 
 def get_mexc_market_snapshot(data):
-    """IMPROVED: Uses pre-fetched, accurate data."""
     if not data: return None
     return {
         'price': data.get('lastPrice'),
@@ -315,46 +350,52 @@ def get_mexc_market_snapshot(data):
 def calculate_rsi(prices: list, period: int = 14):
     if len(prices) < period + 1: return 50.0
     deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
-    gains = [d for d in deltas[-period:] if d > 0]
-    losses = [-d for d in deltas[-period:] if d < 0]
-    avg_gain = sum(gains) / period if gains else 0
-    avg_loss = sum(losses) / period if losses else 0
+    gains = [d for d in deltas if d > 0]
+    losses = [-d for d in deltas if d < 0]
+    avg_gain = sum(gains[-period:]) / period if gains else 0
+    avg_loss = sum(losses[-period:]) / period if losses else 0
     if avg_loss == 0: return 100.0
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
 async def analyze_technical_data(session, symbol_usdt):
-    """IMPROVED: More resilient error handling."""
+    """REBUILT V13: Adaptive technical analysis."""
     try:
         klines = await get_klines(session, symbol_usdt, '1h', 100)
-        if not klines or len(klines) < 50: 
-            logger.warning(f"Not enough kline data for {symbol_usdt} to analyze.")
+        if not klines or len(klines) < 15:
+            logger.warning(f"Not enough kline data for {symbol_usdt} to analyze (got {len(klines) if klines else 0}).")
             return None
+
         closes = [float(k[4]) for k in klines]
         rsi = calculate_rsi(closes, 14)
-        sma_50 = sum(closes[-50:]) / 50
-        trend = "صاعد" if closes[-1] > sma_50 else "هابط"
-        return {'trend': trend, 'rsi': rsi, 'basis': "فوق متوسط 50 ساعة" if trend == "صاعد" else "تحت متوسط 50 ساعة"}
+
+        trend_data = {}
+        if len(closes) >= 50:
+            sma = sum(closes[-50:]) / 50
+            trend_data = {'trend': "صاعد" if closes[-1] > sma else "هابط", 'basis': "فوق متوسط 50 ساعة"}
+        elif len(closes) >= 20:
+            sma = sum(closes[-20:]) / 20
+            trend_data = {'trend': "صاعد" if closes[-1] > sma else "هابط", 'basis': "فوق متوسط 20 ساعة"}
+        else:
+             trend_data = {'trend': 'غير محدد', 'basis': 'بيانات اتجاه غير كافية'}
+
+        return {'trend': trend_data['trend'], 'rsi': rsi, 'basis': trend_data['basis']}
+
     except Exception as e:
-        logger.error(f"Error during technical analysis for {symbol_usdt}: {e}")
+        logger.error(f"Error during TA for {symbol_usdt}: {e}")
         return None
 
 async def get_coingecko_data(session, base_symbol):
-    """FIXED: Vastly improved search logic for CoinGecko ID."""
     try:
         search_results = await fetch_json(session, f"{COINGECKO_API_BASE_URL}/search", {'query': base_symbol})
         if not search_results or not search_results.get('coins'): return None
         
-        # Find the coin with the exact symbol match
-        coin_id = next((coin['id'] for coin in search_results['coins'] if coin['symbol'].upper() == base_symbol), None)
-        if not coin_id: # If no exact match, fall back to the first result as a last resort
-             coin_id = search_results['coins'][0]['id']
+        coin_id = next((coin['id'] for coin in search_results['coins'] if coin['symbol'].upper() == base_symbol), search_results['coins'][0]['id'])
 
         coin_data = await fetch_json(session, f"{COINGECKO_API_BASE_URL}/coins/{coin_id}?localization=false&tickers=false&market_data=false&sparkline=false")
         if not coin_data: return None
         
         desc_raw = coin_data.get('description', {}).get('en', 'No description available.')
-        # Clean up description
         desc = re.sub('<[^<]+?>', '', desc_raw).split('. ')[0]
 
         links = coin_data.get('links', {})
@@ -369,43 +410,55 @@ async def get_coingecko_data(session, base_symbol):
         return None
 
 async def format_verifier_report(base_symbol, mexc, tech, cg):
-    """IMPROVED: Smarter conclusion logic."""
     report = f"🕵️‍♂️ **تقرير المدقق لعملة: ${base_symbol}** 🕵️‍♂️\n\n"
     report += "--- (1) **بيانات السوق (MEXC)** ---\n"
     report += f"  - السعر: `${format_price(mexc['price'])}`\n"
     report += f"  - التغير (24س): `{mexc['change_24h']:+.2f}%` {'🟢' if mexc['change_24h'] >= 0 else '🔴'}\n"
     report += f"  - الحجم (24س): `${mexc['volume_24h']:,.0f}`\n\n"
+    
     report += "--- (2) **تحليل فني (ساعة)** ---\n"
     if tech:
-        rsi_level = "تشبع شرائي" if tech['rsi'] > 70 else "تشبع بيعي" if tech['rsi'] < 30 else "طبيعي"
+        rsi_level = "مرتفع (تشبع شرائي)" if tech['rsi'] > 70 else "منخفض (تشبع بيعي)" if tech['rsi'] < 30 else "طبيعي"
         report += f"  - الاتجاه: `{tech['trend']}` ({tech['basis']}).\n"
         report += f"  - الزخم (RSI): `{tech['rsi']:.1f}` (مستوى `{rsi_level}`).\n\n"
-    else: report += "  - تعذر التحليل (بيانات غير كافية).\n\n"
+    else: 
+        report += "  - تعذر التحليل (بيانات الشموع غير كافية).\n\n"
+        
     report += "--- (3) **هوية المشروع (CoinGecko)** ---\n"
     if cg:
         report += f"  - الوصف: {cg.get('desc', 'N/A')}\n"
         if cg.get('web'): report += f"  - الموقع: [اضغط هنا]({cg['web']})\n"
         if cg.get('x'): report += f"  - تويتر (X): [اضغط هنا]({cg['x']})\n"
         if cg.get('tg'): report += f"  - تليجرام: [اضغط هنا](https://t.me/{cg['tg']})\n\n"
-    else: report += "  - لم يتم العثور على بيانات المشروع.\n\n"
+    else: 
+        report += "  - لم يتم العثور على بيانات المشروع.\n\n"
+        
     report += "--- (4) **خلاصة المدقق** ---\n"
     s, w = [], []
-    if tech and tech['trend'] == 'صاعد': s.append("اتجاه صاعد")
     if mexc['volume_24h'] > 1000000: s.append("حجم تداول قوي")
     
-    if not tech: w.append("فشل التحليل الفني")
-    elif tech['rsi'] > 70: w.append("RSI مرتفع (خطر تصحيح)")
+    if tech:
+        if tech['trend'] == 'صاعد': 
+            s.append(f"اتجاه صاعد ({tech['basis']})")
+        elif tech['trend'] == 'هابط':
+            w.append(f"اتجاه هابط ({tech['basis']})")
+            
+        if tech['rsi'] > 70: 
+            w.append(f"RSI مرتفع ({tech['rsi']:.0f})")
+        elif tech['rsi'] < 30:
+            s.append(f"RSI منخفض ({tech['rsi']:.0f})")
+    else: 
+        w.append("فشل التحليل الفني")
+        
     if not cg: w.append("مشروع غير معروف")
     
-    report += f"  - القوة: {', '.join(s) if s else 'لا توجد نقاط قوة واضحة'}.\n"
-    report += f"  - الضعف: {', '.join(w) if w else 'لا توجد نقاط ضعف واضحة'}.\n"
+    report += f"  - نقاط القوة: {', '.join(s) if s else 'لا توجد نقاط قوة واضحة'}.\n"
+    report += f"  - نقاط الضعف: {', '.join(w) if w else 'لا توجد نقاط ضعف واضحة'}.\n"
     return report
 
 # =============================================================================
-# 5. المهام الآلية الدورية (دون تغيير جوهري)
+# 5. المهام الآلية الدورية
 # =============================================================================
-# The rest of the functions (fomo_hunter, new_listings_sniper, etc.) remain
-# functionally the same as in v11.2. They are included here for completeness.
 def add_to_monitoring(symbol, alert_price, peak_volume, alert_time, source):
     if symbol not in active_hunts:
         active_hunts[symbol] = {'alert_price': alert_price, 'alert_time': alert_time}
@@ -469,7 +522,6 @@ async def analyze_fomo_symbol(session, symbol):
         return {'vol_inc': vol_inc_str, 'price_ptrn': f"صعود +{price_inc:,.2f}% في 4 ساعات", 'price': current_price}
     except Exception: return None
 
-# ... (rest of the old functions: new_listings_sniper_loop, monitor_active_hunts_loop, performance_tracker_loop, get_performance_report)
 async def new_listings_sniper_loop(session: aiohttp.ClientSession):
     global known_symbols
     logger.info("New Listings Sniper started.")
@@ -502,7 +554,7 @@ async def monitor_active_hunts_loop(session: aiohttp.ClientSession):
         now = datetime.now(UTC)
         for symbol in list(active_hunts.keys()):
             if now - active_hunts[symbol]['alert_time'] > timedelta(hours=2):
-                del active_hunts[symbol]
+                if symbol in active_hunts: del active_hunts[symbol]
                 logger.info(f"MONITORING STOPPED for {symbol} (timeout).")
                 continue
             try:
@@ -516,21 +568,78 @@ async def monitor_active_hunts_loop(session: aiohttp.ClientSession):
                     reason = "شمعتان حمراوان متتاليتان"
                     if float(last_c[5]) < float(prev_c[5]): reason += " مع انخفاض السيولة"
                     send_weakness_alert(symbol, reason, float(last_c[4]))
-                    del active_hunts[symbol]
+                    if symbol in active_hunts: del active_hunts[symbol]
             except Exception as e:
                 logger.error(f"Error monitoring {symbol}: {e}")
-# ...
-async def get_performance_report(context, chat_id, msg_id, session): pass
-async def performance_tracker_loop(session: aiohttp.ClientSession): pass
-async def run_momentum_detector(context, chat_id, msg_id, session): pass
-def send_weakness_alert(symbol, reason, current_price): pass
+
+def send_weakness_alert(symbol, reason, current_price):
+    msg = (f"⚠️ **تحذير ضعف الزخم: ${symbol.replace('USDT', '')}** ⚠️\n\n"
+           f"- السبب: `{reason}`\n"
+           f"- السعر: `${format_price(current_price)}`")
+    bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
+    logger.info(f"WEAKNESS ALERT for {symbol}. Reason: {reason}")
+
+async def performance_tracker_loop(session: aiohttp.ClientSession):
+    logger.info("Performance Tracker started.")
+    while True:
+        await asyncio.sleep(RUN_PERFORMANCE_TRACKER_EVERY_MINUTES * 60)
+        now = datetime.now(UTC)
+        for symbol in list(performance_tracker.keys()):
+            data = performance_tracker[symbol]
+            if now - data['alert_time'] > timedelta(hours=PERFORMANCE_TRACKING_DURATION_HOURS):
+                data['status'] = 'Archived'
+                logger.info(f"PERFORMANCE TRACKING ARCHIVED for {symbol}.")
+                continue
+            if data['status'] == 'Archived':
+                if symbol in performance_tracker: del performance_tracker[symbol]
+                continue
+            
+            price = await get_current_price(session, symbol)
+            if price:
+                data['current_price'] = price
+                if price > data['high_price']: data['high_price'] = price
+
+async def get_performance_report(context, chat_id, msg_id, session):
+    try:
+        if not performance_tracker:
+            context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="ℹ️ لا توجد عملات قيد تتبع الأداء حالياً."); return
+
+        symbols_to_update = [s for s, d in performance_tracker.items() if d.get('status') == 'Tracking']
+        prices = await asyncio.gather(*[get_current_price(session, s) for s in symbols_to_update])
+        for i, symbol in enumerate(symbols_to_update):
+            if prices[i]:
+                performance_tracker[symbol]['current_price'] = prices[i]
+                if prices[i] > performance_tracker[symbol]['high_price']:
+                    performance_tracker[symbol]['high_price'] = prices[i]
+
+        sorted_symbols = sorted(performance_tracker.items(), key=lambda item: item[1]['alert_time'], reverse=True)
+        msg = "📊 **تقرير أداء العملات المرصودة** 📊\n\n"
+        for symbol, data in sorted_symbols:
+            if data['status'] == 'Archived': continue
+            alert_p, current_p, high_p = data['alert_price'], data['current_price'], data['high_price']
+            curr_chg = ((current_p - alert_p) / alert_p) * 100 if alert_p > 0 else 0
+            peak_chg = ((high_p - alert_p) / alert_p) * 100 if alert_p > 0 else 0
+            
+            time_since_alert = datetime.now(UTC) - data['alert_time']
+            hours, remainder = divmod(time_since_alert.total_seconds(), 3600)
+            minutes, _ = divmod(remainder, 60)
+            time_str = f"{int(hours)} س و {int(minutes)} د"
+
+            msg += (f"{'🟢' if curr_chg >= 0 else '🔴'} **${symbol.replace('USDT','')}** (منذ {time_str})\n"
+                    f"   - سعر التنبيه: `${format_price(alert_p)}`\n"
+                    f"   - الحالي: `${format_price(current_p)}` (**{curr_chg:+.2f}%**)\n"
+                    f"   - الأعلى: `${format_price(high_p)}` (**{peak_chg:+.2f}%**)\n\n")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=msg, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Error in get_performance_report: {e}")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="حدث خطأ.")
 
 # =============================================================================
 # 6. تشغيل البوت
 # =============================================================================
 def send_startup_message():
     try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت التداول (v12) متصل!**", parse_mode=ParseMode.MARKDOWN)
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت التداول (v13) متصل!**", parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent.")
     except Exception as e:
         logger.error(f"Failed to send startup message: {e}")
@@ -545,7 +654,6 @@ async def main():
         loop = asyncio.get_running_loop()
         dp.bot_data.update({'loop': loop, 'session': session})
 
-        # --- Handlers ---
         dp.add_handler(CommandHandler("start", start_command))
         dp.add_handler(MessageHandler(Filters.regex(re.compile(r'^[A-Z0-9]{2,10}$', re.IGNORECASE)), verifier_command_handler))
         
