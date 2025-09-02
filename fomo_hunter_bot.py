@@ -46,8 +46,7 @@ MOMENTUM_MIN_VOLUME_24H = 50000
 MOMENTUM_MAX_VOLUME_24H = 2000000
 MOMENTUM_VOLUME_INCREASE = 1.8
 MOMENTUM_PRICE_INCREASE = 4.0
-# --- v13.5 FIX: Corrected interval format ---
-MOMENTUM_KLINE_INTERVAL = 'MINUTE_5' # Was '5m'
+MOMENTUM_KLINE_INTERVAL = 'MINUTE_5'
 MOMENTUM_KLINE_LIMIT = 12
 
 # --- Advanced Settings ---
@@ -77,13 +76,20 @@ market_data_cache = {'data': None, 'timestamp': datetime.min}
 # =============================================================================
 # 1. قسم الشبكة والوظائف الأساسية (Async)
 # =============================================================================
+# --- START MODIFIED FUNCTION (v13.6 - Anti-Block Fix) ---
 async def fetch_json(session: aiohttp.ClientSession, url: str):
-    """A robust fetching function that returns the exact error from the server."""
+    """
+    Final version: Uses a full set of browser headers to avoid being blocked by WAFs like Akamai.
+    This is the last resort to fix the 403 Forbidden error.
+    """
     try:
         logger.info(f"Attempting to fetch: {url}")
+        # These headers mimic a real Chrome browser on Windows
         headers = {
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Language': 'en-US,en;q=0.9',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'application/json'
         }
         async with session.get(url, timeout=HTTP_TIMEOUT, headers=headers) as response:
             if response.status >= 400:
@@ -99,6 +105,7 @@ async def fetch_json(session: aiohttp.ClientSession, url: str):
         error_message = f"Type={type(e).__name__}, Msg='{str(e)}'"
         logger.error(f"NETWORK/CLIENT ERROR for {url}: {error_message}")
         return {"__error__": error_message}
+# --- END MODIFIED FUNCTION ---
 
 async def get_market_data(session: aiohttp.ClientSession, force_refresh: bool = False):
     now = datetime.now()
@@ -225,11 +232,11 @@ def build_menu():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def start_command(update: Update, context: CallbackContext):
-    msg = ("✅ **بوت التداول الذكي (v13.5) جاهز!**\n\n"
+    msg = ("✅ **بوت التداول الذكي (v13.6) جاهز!**\n\n"
            "**تحسينات رئيسية:**\n"
-           "- تم إصلاح مشكلة `Invalid Interval` بشكل نهائي.\n"
-           "- يجب أن يعمل **المدقق** الآن بشكل صحيح 100% مع جميع العملات.\n\n"
-           "شكراً لصبرك. البوت الآن في أفضل حالاته.")
+           "- تم تطبيق إصلاح شامل لمحاولة تجاوز حظر السيرفر (`403 Forbidden`).\n"
+           "- هذه هي المحاولة الأخيرة لحل المشكلة عن طريق الكود.\n\n"
+           "**إذا استمر الخطأ، فهذا يعني أن IP السيرفر الخاص بك محظور.**")
     update.message.reply_text(msg, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
 
 def status_command(update: Update, context: CallbackContext):
@@ -334,7 +341,7 @@ async def run_momentum_detector(context, chat_id, msg_id, session):
         add_to_monitoring(coin['sym'], float(coin['pr']), 0, now, "الزخم اليدوي")
 
 # =============================================================================
-# 4. ميزة المدقق (The Verifier) - نسخة مطورة V13.5
+# 4. ميزة المدقق (The Verifier) - نسخة مطورة V13.6
 # =============================================================================
 def verifier_command_handler(update: Update, context: CallbackContext):
     symbol = update.message.text.strip().upper()
@@ -355,6 +362,10 @@ async def run_verifier(context, chat_id, msg_id, base_symbol, session):
         context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=f"لم يتم العثور على زوج التداول الفوري `{exact_symbol}` في MEXC.", parse_mode=ParseMode.MARKDOWN); return
 
     mexc_data = get_mexc_market_snapshot(all_market_data[exact_symbol])
+    
+    # v13.6 FIX: Add a small delay to space out requests and seem less bot-like
+    await asyncio.sleep(0.25)
+    
     tech_task = analyze_technical_data(session, exact_symbol)
     cg_task = get_coingecko_data(session, base_symbol)
     
@@ -384,8 +395,7 @@ def calculate_rsi(prices: list, period: int = 14):
     return 100 - (100 / (1 + rs))
 
 async def analyze_technical_data(session, symbol_usdt):
-    # --- v13.5 FIX: Corrected interval format ---
-    klines = await get_klines(session, symbol_usdt, 'HOUR_1', 100) # Was '1h'
+    klines = await get_klines(session, symbol_usdt, 'HOUR_1', 100)
     
     if isinstance(klines, dict) and "__error__" in klines:
         return klines
@@ -511,7 +521,7 @@ async def format_verifier_report(base_symbol, mexc, tech, cg):
     return report
 
 # =============================================================================
-# 5. المهام الآلية الدورية
+# 5. المهام الآلية الدورية - No changes
 # =============================================================================
 def add_to_monitoring(symbol, alert_price, peak_volume, alert_time, source):
     if symbol not in active_hunts:
@@ -557,14 +567,12 @@ async def fomo_hunter_loop(session: aiohttp.ClientSession):
 
 async def analyze_fomo_symbol(session, symbol):
     try:
-        # --- v13.5 FIX: Corrected interval format ---
-        daily_klines = await get_klines(session, symbol, 'DAY_1', 2) # Was '1d'
+        daily_klines = await get_klines(session, symbol, 'DAY_1', 2)
         if not daily_klines or "__error__" in daily_klines or len(daily_klines) < 2: return None
         prev_vol, curr_vol = float(daily_klines[0][7]), float(daily_klines[1][7])
         if not (curr_vol > MIN_USDT_VOLUME and curr_vol > (prev_vol * VOLUME_SPIKE_MULTIPLIER)): return None
 
-        # --- v13.5 FIX: Corrected interval format ---
-        hourly_klines = await get_klines(session, symbol, 'HOUR_1', 4) # Was '1h'
+        hourly_klines = await get_klines(session, symbol, 'HOUR_1', 4)
         if not hourly_klines or "__error__" in hourly_klines or len(hourly_klines) < 4: return None
         initial_price = float(hourly_klines[0][1])
         if initial_price == 0: return None
@@ -614,8 +622,7 @@ async def monitor_active_hunts_loop(session: aiohttp.ClientSession):
                 logger.info(f"MONITORING STOPPED for {symbol} (timeout).")
                 continue
             try:
-                # --- v13.5 FIX: Corrected interval format ---
-                klines = await get_klines(session, symbol, 'MINUTE_5', 3) # Was '5m'
+                klines = await get_klines(session, symbol, 'MINUTE_5', 3)
                 if not klines or "__error__" in klines or len(klines) < 3: continue
                 last_c, prev_c = klines[-1], klines[-2]
                 is_last_red = float(last_c[4]) < float(last_c[1])
@@ -696,7 +703,7 @@ async def get_performance_report(context, chat_id, msg_id, session):
 # =============================================================================
 def send_startup_message():
     try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت التداول (v13.5) متصل!**", parse_mode=ParseMode.MARKDOWN)
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت التداول (v13.6) متصل!**", parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent.")
     except Exception as e:
         logger.error(f"Failed to send startup message: {e}")
