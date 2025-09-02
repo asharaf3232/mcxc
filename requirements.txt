@@ -3,3 +3,4 @@ requests
 schedule
 dnspython
 urllib3<2.0
+websockets
