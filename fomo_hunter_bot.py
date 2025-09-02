@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import os
 import asyncio
@@ -679,5 +678,3 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped manually.")
-
-هذا كودى افهمة لنكمل تطوير ميزة
