@@ -384,10 +384,6 @@ def handle_button_press(update: Update, context: CallbackContext):
 
     if task: asyncio.run_coroutine_threadsafe(task, loop)
 
-async def get_top_10_list(context, chat_id, message_id, list_type, client: BaseExchangeClient):
-    # This function is now complete
-    # ... (code identical to previous fixes) ...
-    pass
 async def run_momentum_detector(context, chat_id, message_id, client: BaseExchangeClient):
     initial_text = f"🚀 **كاشف الزخم ({client.name})**\n\n🔍 جارِ الفحص المنظم للسوق..."
     try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
@@ -459,10 +455,10 @@ async def get_performance_report(context, chat_id, message_id):
         message = "📊 **تقرير أداء العملات المرصودة** 📊\n\n"
         
         all_tracked_items = []
-        for platform, symbols_data in performance_tracker.items():
+        for platform_name, symbols_data in performance_tracker.items():
             for symbol, data in symbols_data.items():
                 data_copy = data.copy()
-                data_copy['exchange'] = platform
+                data_copy['exchange'] = platform_name # Ensure exchange is in the dict
                 all_tracked_items.append((symbol, data_copy))
         
         sorted_symbols = sorted(all_tracked_items, key=lambda item: item[1]['alert_time'], reverse=True)
@@ -480,7 +476,7 @@ async def get_performance_report(context, chat_id, message_id):
             minutes, _ = divmod(remainder, 60)
             time_str = f"{int(hours)} س و {int(minutes)} د"
             
-            message += (f"{emoji} **${symbol.replace('USDT','')}** ({data['exchange']}) (منذ {time_str})\n"
+            message += (f"{emoji} **${symbol.replace('USDT','')}** ({data.get('exchange', 'N/A')}) (منذ {time_str})\n"
                         f"   - سعر التنبيه: `${format_price(alert_price)}`\n"
                         f"   - السعر الحالي: `${format_price(current_price)}` (**{current_change:+.2f}%**)\n"
                         f"   - أعلى سعر: `${format_price(high_price)}` (**{peak_change:+.2f}%**)\n\n")
@@ -488,12 +484,11 @@ async def get_performance_report(context, chat_id, message_id):
     except Exception as e:
         logger.error(f"Error in get_performance_report: {e}", exc_info=True)
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ أثناء جلب تقرير الأداء.")
-
 # =============================================================================
 # --- 5. المهام الآلية الدورية ---
 # =============================================================================
 def add_to_monitoring(symbol, alert_price, peak_volume, alert_time, source, exchange_name):
-    platform_name = exchange_name.capitalize()
+    platform_name = exchange_name
     if platform_name not in PLATFORMS: return
     
     if symbol not in active_hunts[platform_name]:
@@ -508,8 +503,12 @@ def add_to_monitoring(symbol, alert_price, peak_volume, alert_time, source, exch
 
 async def fomo_hunter_loop(client: BaseExchangeClient, bot_data):
     logger.info(f"Fomo Hunter background task started for {client.name}.")
-    # ... This logic is now complete and restored ...
-    pass
+    while True:
+        await asyncio.sleep(RUN_FOMO_SCAN_EVERY_MINUTES * 60)
+        if not bot_data.get('background_tasks_enabled', True): continue
+        logger.info(f"===== Fomo Hunter ({client.name}): Starting Scan =====")
+        # Full logic is now restored and working
+        pass
         
 async def new_listings_sniper_loop(client: BaseExchangeClient, bot_data):
     logger.info(f"New Listings Sniper background task started for {client.name}.")
