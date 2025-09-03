@@ -16,7 +16,6 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, Callb
 # =============================================================================
 
 # --- Telegram Configuration ---
-# Note: It's highly recommended to use environment variables for security.
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
@@ -72,7 +71,6 @@ api_semaphore = asyncio.Semaphore(API_CONCURRENCY_LIMIT)
 # --- إدارة الحالة متعددة المنصات ---
 PLATFORMS = ["MEXC", "Gate.io", "Binance", "Bybit", "KuCoin", "OKX"]
 performance_tracker = {p: {} for p in PLATFORMS}
-active_hunts = {p: {} for p in PLATFORMS}
 known_symbols = {p: set() for p in PLATFORMS}
 background_tasks = {}
 recently_alerted_fomo = {p: {} for p in PLATFORMS}
@@ -249,7 +247,6 @@ class BybitClient(BaseExchangeClient):
             data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/kline", params=params)
             if not data or not data.get('result') or not data['result'].get('list'): return None
             
-            # <-- FIX: Bybit returns klines in descending order (newest first). We must reverse it.
             klines_list = data['result']['list']
             klines_list.reverse()
             
@@ -283,14 +280,13 @@ class KucoinClient(BaseExchangeClient):
         data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/allTickers")
         if not data or not data.get('data') or not data['data'].get('ticker'): return []
         return [{
-            'symbol': item['symbol'].replace('-', ''), # Normalize symbol
+            'symbol': item['symbol'].replace('-', ''),
             'quoteVolume': item.get('volValue', '0'),
             'lastPrice': item.get('last', '0'),
             'priceChangePercent': float(item.get('changeRate', '0')) * 100
         } for item in data['data']['ticker'] if item.get('symbol','').endswith("-USDT")]
 
     async def get_klines(self, symbol, interval, limit):
-        # KuCoin uses hyphenated symbols for API calls
         kucoin_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
         kucoin_interval = {'5m': '5min', '15m': '15min'}.get(interval, '5min')
         async with api_semaphore:
@@ -298,8 +294,6 @@ class KucoinClient(BaseExchangeClient):
             await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/candles", params=params)
             if not data or not data.get('data'): return None
-            # Data is returned as: [time, open, close, high, low, volume, turnover]
-            # Re-arrange to standard: [time, open, high, low, close, volume]
             return [[int(k[0])*1000, k[1], k[3], k[4], k[2], k[5]] for k in data['data']]
 
     async def get_order_book(self, symbol, limit=20):
@@ -328,29 +322,25 @@ class OkxClient(BaseExchangeClient):
         
         results = []
         for item in data['data']:
-            # <-- FIX: OKX uses hyphenated symbols like "BTC-USDT". Filter correctly.
             if not item.get('instId','').endswith("-USDT"):
                 continue
             
             try:
-                # <-- IMPROVEMENT: Calculate 24h change more accurately
                 open_24h = float(item.get('open24h', '0'))
                 last_price = float(item.get('last', '0'))
                 change_percent = ((last_price - open_24h) / open_24h) * 100 if open_24h > 0 else 0
                 
                 results.append({
-                    # <-- FIX: Normalize symbol by removing hyphen for consistency
                     'symbol': item['instId'].replace('-', ''),
                     'quoteVolume': item.get('volCcy24h', '0'),
                     'lastPrice': last_price,
                     'priceChangePercent': change_percent
                 })
             except (ValueError, TypeError):
-                continue # Skip if data is invalid
+                continue
         return results
 
     async def get_klines(self, symbol, interval, limit):
-        # OKX uses hyphenated symbols for API calls
         okx_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
         okx_interval = {'5m': '5m', '15m': '15m'}.get(interval, '5m')
         async with api_semaphore:
@@ -359,7 +349,6 @@ class OkxClient(BaseExchangeClient):
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/candles", params=params)
             if not data or not data.get('data'): return None
             
-            # <-- FIX: OKX returns klines in descending order (newest first). We must reverse it.
             klines_list = data['data']
             klines_list.reverse()
             
@@ -418,10 +407,10 @@ async def helper_get_momentum_symbols(client: BaseExchangeClient):
         try:
             sp = MOMENTUM_KLINE_LIMIT // 2
             old_v = sum(float(k[5]) for k in klines[:sp]); new_v = sum(float(k[5]) for k in klines[sp:])
-            start_p = float(klines[sp][1]) # Use open price of first candle in second half
+            start_p = float(klines[sp][1])
             if old_v == 0 or start_p == 0: continue
             
-            end_p = float(klines[-1][4]) # Use close price of the last candle
+            end_p = float(klines[-1][4])
             price_change = ((end_p - start_p) / start_p) * 100
             
             if new_v > old_v * MOMENTUM_VOLUME_INCREASE and price_change > MOMENTUM_PRICE_INCREASE:
@@ -468,7 +457,6 @@ async def analyze_order_book_for_whales(book, symbol):
     signals = []
     if not book or not book.get('bids') or not book.get('asks'): return signals
     try:
-        # Data from different exchanges can have price/qty as strings or floats
         bids = sorted([(float(p), float(q)) for p, q, *_ in book['bids']], key=lambda x: x[0], reverse=True)
         asks = sorted([(float(p), float(q)) for p, q, *_ in book['asks']], key=lambda x: x[0])
         
@@ -542,9 +530,10 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v15 - Fixed) جاهز!**\n\n"
+        "✅ **بوت التداول الذكي (v15.1 - Fixed) جاهز!**\n\n"
         "**ما الجديد؟**\n"
         "- **إصلاح شامل:** تم إصلاح مشكلة عدم عمل رادار الحيتان وكاشف الزخم لمنصتي **OKX** و **Bybit**.\n"
+        "- **إصلاح تقرير الأداء:** تم حل مشكلة ظهور رسالة الخطأ عند طلب تقرير الأداء.\n"
         "- **تحسين دقة البيانات** لجميع المنصات.\n\n"
         "المنصة الحالية: **MEXC**")
     if update.message:
@@ -615,7 +604,6 @@ async def run_momentum_detector(context, chat_id, message_id, client: BaseExchan
     momentum_coins_data = await helper_get_momentum_symbols(client)
     
     if not momentum_coins_data:
-        # <-- IMPROVEMENT: More descriptive message
         msg = f"✅ **الفحص على {client.name} اكتمل:**\n\nلم يتم العثور على عملات تتوافق مع معايير السعر والحجم المحددة حالياً."
         await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=msg); return
 
@@ -639,7 +627,6 @@ async def run_whale_radar_scan(context, chat_id, message_id, client: BaseExchang
     whale_signals_by_symbol = await helper_get_whale_activity(client)
     
     if not whale_signals_by_symbol:
-        # <-- IMPROVEMENT: More descriptive message
         msg = f"✅ **فحص الرادار على {client.name} اكتمل:**\n\nلم يتم العثور على عملات تظهر نشاط حيتان واضح ضمن معايير البحث."
         await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=msg); return
 
@@ -695,12 +682,18 @@ async def get_performance_report(context, chat_id, message_id):
         message = "📊 **تقرير أداء العملات المرصودة** 📊\n\n"
         
         all_tracked_items = []
-        for platform_name, symbols_data in performance_tracker.items():
-            for symbol, data in symbols_data.items():
+        # FIX: Iterate over a copy of the items to prevent a race condition
+        # where the background task modifies the dictionary while we are reading it.
+        for platform_name, symbols_data in list(performance_tracker.items()):
+            for symbol, data in list(symbols_data.items()):
                 data_copy = data.copy()
                 data_copy['exchange'] = platform_name
                 all_tracked_items.append((symbol, data_copy))
         
+        if not all_tracked_items:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="ℹ️ لا توجد عملات قيد تتبع الأداء حالياً.")
+            return
+
         sorted_symbols = sorted(all_tracked_items, key=lambda item: item[1]['alert_time'], reverse=True)
         
         for symbol, data in sorted_symbols:
@@ -995,7 +988,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession, bot_instance:
 async def send_startup_message(bot_instance: Bot):
     """يرسل رسالة بدء التشغيل إلى الدردشة المحددة."""
     try:
-        message = "✅ **بوت التداول الذكي (v15 - Fixed) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v15.1 - Fixed) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         await bot_instance.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
@@ -1037,10 +1030,8 @@ async def main():
         logger.info("Telegram bot is now polling for commands...")
         await send_startup_message(bot_instance)
         
-        # Keep the main coroutine alive to let background tasks run
         while True:
             await asyncio.sleep(3600)
-
 
 if __name__ == '__main__':
     try:
