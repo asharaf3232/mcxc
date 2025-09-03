@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # --- المتغيرات العامة وتهيئة البوت ---
 # =============================================================================
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
-active_hunts, performance_tracker = {}, {}
+active_hunts, performance_tracker, recently_alerted_fomo, recently_alerted_instant = {}, {}, {}, {}
 activity_tracker = {}
 activity_lock = asyncio.Lock()
 api_semaphore = asyncio.Semaphore(API_CONCURRENCY_LIMIT)
@@ -180,7 +180,7 @@ class GateioClient(BaseExchangeClient):
             data = await fetch_json(self.session, f"{self.base_api_url}/spot/candlesticks", params=params)
             if not data: return None
             # [open time, open, high, low, close, volume, close time, quote asset volume]
-            return [[int(k[0])*1000, k[5], k[3], k[4], k[2], k[1], 0, 0] for k in data]
+            return [[int(k[0])*1000, k[5], k[3], k[4], k[2], k[1], 0, float(k[2])*float(k[1])] for k in data]
 
     async def get_order_book(self, symbol, limit=20):
         gateio_symbol = f"{symbol[:-4]}_{symbol[-4:]}"
@@ -218,10 +218,10 @@ def get_exchange_client(exchange_name, session):
 # =============================================================================
 async def run_websocket_client(exchange_client: BaseExchangeClient):
     logger.info(f"Starting WebSocket client for {exchange_client.name}...")
-    subscription_msg = exchange_client.get_ws_subscription_payload()
     while True:
         try:
             async with websockets.connect(exchange_client.get_ws_url()) as websocket:
+                subscription_msg = exchange_client.get_ws_subscription_payload()
                 await websocket.send(json.dumps(subscription_msg))
                 logger.info(f"Successfully connected and subscribed to {exchange_client.name} WebSocket.")
                 while True:
@@ -244,7 +244,6 @@ async def run_websocket_client(exchange_client: BaseExchangeClient):
             await asyncio.sleep(10)
 
 async def periodic_activity_checker():
-    # This function is generic and doesn't need to be changed
     # ... (code is identical to previous versions)
     pass
 
@@ -286,7 +285,7 @@ async def helper_get_whale_activity(client: BaseExchangeClient):
     whale_signals_by_symbol = {}
     for i, book in enumerate(all_order_books):
         symbol = top_gems[i]['symbol']
-        signals = await analyze_order_book_for_whales(book, symbol) # This function is generic
+        signals = await analyze_order_book_for_whales(book, symbol)
         if signals:
             if symbol not in whale_signals_by_symbol: whale_signals_by_symbol[symbol] = []
             for signal in signals:
@@ -294,17 +293,17 @@ async def helper_get_whale_activity(client: BaseExchangeClient):
                 whale_signals_by_symbol[symbol].append(signal)
     return whale_signals_by_symbol
 
-async def analyze_order_book_for_whales(book, symbol): # Generic helper, no changes needed
+async def analyze_order_book_for_whales(book, symbol):
     signals = []
     if not book or not book.get('bids') or not book.get('asks'): return signals
     try:
         bids = sorted([(float(p), float(q)) for p, q in book['bids']], key=lambda x: x[0], reverse=True)
         asks = sorted([(float(p), float(q)) for p, q in book['asks']], key=lambda x: x[0])
         for price, qty in bids[:5]:
-            if value := price * qty >= WHALE_WALL_THRESHOLD_USDT:
+            if (value := price * qty) >= WHALE_WALL_THRESHOLD_USDT:
                 signals.append({'type': 'Buy Wall', 'value': value, 'price': price}); break
         for price, qty in asks[:5]:
-            if value := price * qty >= WHALE_WALL_THRESHOLD_USDT:
+            if (value := price * qty) >= WHALE_WALL_THRESHOLD_USDT:
                 signals.append({'type': 'Sell Wall', 'value': value, 'price': price}); break
         bids_value = sum(p * q for p, q in bids[:10])
         asks_value = sum(p * q for p, q in asks[:10])
@@ -315,6 +314,7 @@ async def analyze_order_book_for_whales(book, symbol): # Generic helper, no chan
     except Exception as e:
         logger.warning(f"Could not analyze order book for {symbol}: {e}")
     return signals
+
 # =============================================================================
 # --- 4. الوظائف التفاعلية (أوامر البوت) ---
 # =============================================================================
@@ -327,7 +327,7 @@ BTN_STATUS = "📊 الحالة"
 BTN_PERFORMANCE = "📈 تقرير الأداء"
 BTN_CROSS_ANALYSIS = "💪 تحليل متقاطع"
 BTN_SELECT_MEXC = "🚀 اختر MEXC"
-BTN_SELECT_GATEIO = " Gate.io اختر"
+BTN_SELECT_GATEIO = "Gate.io اختر" # إصلاح: إزالة المسافة الزائدة
 
 def build_menu():
     keyboard = [
@@ -336,12 +336,12 @@ def build_menu():
         [BTN_STATUS, BTN_PERFORMANCE, BTN_CROSS_ANALYSIS],
         [BTN_SELECT_MEXC, BTN_SELECT_GATEIO]
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     welcome_message = (
-        "✅ **بوت التداول الذكي (v13.1 - متعدد المنصات) جاهز!**\n\n"
+        "✅ **بوت التداول الذكي (v13.2 - ثابت) جاهز!**\n\n"
         "**ترقية كبرى:**\n"
         "- الآن يدعم البوت منصتي **MEXC** و **Gate.io**.\n"
         "- استخدم الأزرار الجديدة في الأسفل لاختيار المنصة قبل إجراء أي فحص.\n\n"
@@ -353,8 +353,21 @@ def set_exchange(update: Update, context: CallbackContext, exchange_name: str):
     context.user_data['exchange'] = exchange_name.lower()
     update.message.reply_text(f"✅ تم تحويل المنصة بنجاح. المنصة النشطة الآن هي: **{exchange_name}**", parse_mode=ParseMode.MARKDOWN)
 
+def status_command(update: Update, context: CallbackContext):
+    # This function was missing
+    active_hunts_count = len(active_hunts)
+    performance_tracked_count = len(performance_tracker)
+    message = (
+        "📊 **حالة البوت** 📊\n\n"
+        f"**1. مساعد إدارة الصفقات:**\n"
+        f"   - ✅ {'نشط، يراقب ' + str(active_hunts_count) + ' فرصة' if active_hunts_count > 0 else 'ينتظر فرصة جديدة'}.\n\n"
+        f"**2. متتبع الأداء:**\n"
+        f"   - ✅ {'نشط، يراقب أداء ' + str(performance_tracked_count) + ' عملة' if performance_tracked_count > 0 else 'ينتظر تنبيهات جديدة لتتبعها'}."
+    )
+    update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
 def handle_button_press(update: Update, context: CallbackContext):
-    button_text = update.message.text
+    button_text = update.message.text.strip() # Use strip() to avoid issues with spaces
     chat_id = update.message.chat_id
     loop = context.bot_data['loop']
     session = context.bot_data['session']
@@ -370,16 +383,11 @@ def handle_button_press(update: Update, context: CallbackContext):
     client = get_exchange_client(current_exchange, session)
     sent_message = context.bot.send_message(chat_id=chat_id, text=f"🔍 جارِ تنفيذ طلبك على منصة {client.name}...")
     
-    task_map = {
-        BTN_MOMENTUM: run_momentum_detector,
-        BTN_WHALE_RADAR: run_whale_radar_scan,
-        BTN_CROSS_ANALYSIS: run_cross_analysis,
-        BTN_PERFORMANCE: get_performance_report
-    }
-    
     task = None
-    if button_text in task_map:
-        task = task_map[button_text](context, chat_id, sent_message.message_id, client)
+    if button_text == BTN_MOMENTUM: task = run_momentum_detector(context, chat_id, sent_message.message_id, client)
+    elif button_text == BTN_WHALE_RADAR: task = run_whale_radar_scan(context, chat_id, sent_message.message_id, client)
+    elif button_text == BTN_CROSS_ANALYSIS: task = run_cross_analysis(context, chat_id, sent_message.message_id, client)
+    elif button_text == BTN_PERFORMANCE: task = get_performance_report(context, chat_id, sent_message.message_id, session) # Performance needs session
     elif button_text in [BTN_GAINERS, BTN_LOSERS, BTN_VOLUME]:
         list_type = {'📈 الأكثر ارتفاعاً': 'gainers', '📉 الأكثر انخفاضاً': 'losers', '💰 الأعلى سيولة': 'volume'}[button_text]
         task = get_top_10_list(context, chat_id, sent_message.message_id, list_type, client)
@@ -408,11 +416,10 @@ async def get_top_10_list(context, chat_id, message_id, list_type, client: BaseE
                         f"   - السعر الحالي: `${format_price(pair.get('lastPrice', 'N/A'))}`\n\n")
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        logger.error(f"Error in get_top_10_list for {list_type} on {client.name}: {e}")
+        logger.error(f"Error in get_top_10_list for {list_type} on {client.name}: {e}", exc_info=True)
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ أثناء جلب البيانات.")
 
 async def run_momentum_detector(context, chat_id, message_id, client: BaseExchangeClient):
-    # ... code is in helper, this is just the command handler part
     initial_text = f"🚀 **كاشف الزخم ({client.name})**\n\n🔍 جارِ الفحص المنظم للسوق..."
     try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
     except Exception: pass
@@ -430,7 +437,6 @@ async def run_momentum_detector(context, chat_id, message_id, client: BaseExchan
         add_to_monitoring(coin['symbol'], float(coin['current_price']), coin.get('peak_volume', 0), now, f"الزخم ({client.name})", client.name)
 
 async def run_whale_radar_scan(context, chat_id, message_id, client: BaseExchangeClient):
-    # ... code is in helper, this is just the command handler part
     initial_text = f"🐋 **رادار الحيتان ({client.name})**\n\n🔍 جارِ الفحص العميق..."
     try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
     except Exception: pass
@@ -440,10 +446,13 @@ async def run_whale_radar_scan(context, chat_id, message_id, client: BaseExchang
     all_signals = [signal for signals_list in whale_signals_by_symbol.values() for signal in signals_list]
     sorted_signals = sorted(all_signals, key=lambda x: x.get('value', 0), reverse=True)
     message = f"🐋 **تقرير رادار الحيتان ({client.name}) - {datetime.now().strftime('%H:%M:%S')}** 🐋\n\n"
-    # ... (message formatting is the same)
     for signal in sorted_signals:
-        # ... (same as before)
-        pass # Placeholder for brevity, logic is identical to v12.4
+        # This logic is now complete
+        symbol_name = signal['symbol'].replace('USDT', '')
+        if signal['type'] == 'Buy Wall': message += (f"🟢 **حائط شراء ضخم على ${symbol_name}**\n   - **الحجم:** `${signal['value']:,.0f}` USDT\n   - **عند سعر:** `{format_price(signal['price'])}`\n\n")
+        elif signal['type'] == 'Sell Wall': message += (f"🔴 **حائط بيع ضخم على ${symbol_name}**\n   - **الحجم:** `${signal['value']:,.0f}` USDT\n   - **عند سعر:** `{format_price(signal['price'])}`\n\n")
+        elif signal['type'] == 'Buy Pressure': message += (f"📈 **ضغط شراء عالٍ على ${symbol_name}**\n   - **النسبة:** الشراء يفوق البيع بـ `{signal['value']:.1f}x`\n\n")
+        elif signal['type'] == 'Sell Pressure': message += (f"📉 **ضغط بيع عالٍ على ${symbol_name}**\n   - **النسبة:** البيع يفوق الشراء بـ `{signal['value']:.1f}x`\n\n")
     context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
 async def run_cross_analysis(context, chat_id, message_id, client: BaseExchangeClient):
@@ -458,30 +467,64 @@ async def run_cross_analysis(context, chat_id, message_id, client: BaseExchangeC
         if not strong_symbols:
             context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **التحليل المتقاطع على {client.name} اكتمل:**\n\nلم يتم العثور على عملات مشتركة حالياً."); return
         message = f"💪 **تقرير الإشارات القوية ({client.name}) - {datetime.now().strftime('%H:%M:%S')}** 💪\n\n"
-        # ... (message formatting is the same)
         for symbol in strong_symbols:
-            # ... (same as before)
-            pass # Placeholder for brevity
+            # This logic is now complete
+            momentum_details = momentum_coins_data[symbol]
+            whale_signals = whale_signals_by_symbol[symbol]
+            message += f"💎 **${symbol.replace('USDT', '')}** 💎\n"
+            message += f"   - **الزخم:** `%{momentum_details['price_change']:+.2f}` في آخر 30 دقيقة.\n"
+            whale_info_parts = [f"حائط شراء ({s['value']:,.0f} USDT)" for s in whale_signals if s['type'] == 'Buy Wall'] + \
+                               [f"ضغط شراء ({s['value']:.1f}x)" for s in whale_signals if s['type'] == 'Buy Pressure']
+            if whale_info_parts: message += f"   - **الحيتان:** " + ", ".join(whale_info_parts) + ".\n\n"
+            else: message += f"   - **الحيتان:** تم رصد نشاط.\n\n"
+        message += "*(إشارات عالية الجودة تتطلب تحليلك الخاص)*"
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Error in cross_analysis on {client.name}: {e}", exc_info=True)
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ فادح أثناء التحليل المتقاطع.")
 
+async def get_performance_report(context, chat_id, message_id, session: aiohttp.ClientSession):
+    # This function was missing
+    try:
+        if not performance_tracker:
+            context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="ℹ️ لا توجد عملات قيد تتبع الأداء حالياً.")
+            return
+        
+        message = "📊 **تقرير أداء العملات المرصودة** 📊\n\n"
+        sorted_symbols = sorted(performance_tracker.items(), key=lambda item: item[1]['alert_time'], reverse=True)
+        
+        for symbol, data in sorted_symbols:
+            if data['status'] == 'Archived': continue
+            alert_price, current_price, high_price = data['alert_price'], data['current_price'], data['high_price']
+            current_change = ((current_price - alert_price) / alert_price) * 100 if alert_price > 0 else 0
+            peak_change = ((high_price - alert_price) / alert_price) * 100 if alert_price > 0 else 0
+            emoji = "🟢" if current_change >= 0 else "🔴"
+            time_since_alert = datetime.now(UTC) - data['alert_time']
+            hours, remainder = divmod(time_since_alert.total_seconds(), 3600)
+            minutes, _ = divmod(remainder, 60)
+            time_str = f"{int(hours)} س و {int(minutes)} د"
+            
+            message += (f"{emoji} **${symbol.replace('USDT','')}** ({data['exchange']}) (منذ {time_str})\n"
+                        f"   - سعر التنبيه: `${format_price(alert_price)}`\n"
+                        f"   - السعر الحالي: `${format_price(current_price)}` (**{current_change:+.2f}%**)\n"
+                        f"   - أعلى سعر: `${format_price(high_price)}` (**{peak_change:+.2f}%**)\n\n")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Error in get_performance_report: {e}", exc_info=True)
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ أثناء جلب تقرير الأداء.")
+
 # =============================================================================
 # --- 5. المهام الآلية الدورية ---
 # =============================================================================
 def add_to_monitoring(symbol, alert_price, peak_volume, alert_time, source, exchange_name):
-    # Now tracks the exchange
     if symbol not in active_hunts:
-        active_hunts[symbol] = {'alert_price': alert_price, 'alert_time': alert_time, 'peak_volume': peak_volume, 'exchange': exchange_name}
-        logger.info(f"MONITORING STARTED for ({source}) {symbol}")
+        active_hunts[symbol] = {'alert_price': alert_price, 'alert_time': alert_time, 'exchange': exchange_name}
     if symbol not in performance_tracker:
         performance_tracker[symbol] = {'alert_price': alert_price, 'alert_time': alert_time, 'source': source,
                                        'current_price': alert_price, 'high_price': alert_price, 'status': 'Tracking', 'exchange': exchange_name}
-        logger.info(f"PERFORMANCE TRACKING STARTED for {symbol}")
+        logger.info(f"PERFORMANCE TRACKING STARTED for {symbol} on {exchange_name}")
 
 async def performance_tracker_loop(session: aiohttp.ClientSession):
-    # This loop now needs to create clients dynamically
     logger.info("Performance Tracker background task started.")
     while True:
         await asyncio.sleep(RUN_PERFORMANCE_TRACKER_EVERY_MINUTES * 60)
@@ -494,20 +537,24 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
                 del performance_tracker[symbol]
                 continue
             
-            # Create the correct client for the symbol
             client = get_exchange_client(data['exchange'], session)
             current_price = await client.get_current_price(symbol)
             if current_price:
                 performance_tracker[symbol]['current_price'] = current_price
-                if current_price > performance_tracker[symbol]['high_price']:
+                if current_price > data['high_price']:
                     performance_tracker[symbol]['high_price'] = current_price
-
-# ... (other background tasks like fomo_hunter can be implemented similarly)
-# ... for now, they are omitted for clarity as the interactive part is the focus.
 
 # =============================================================================
 # --- 6. تشغيل البوت ---
 # =============================================================================
+def send_startup_message():
+    try:
+        message = "✅ **بوت التداول الذكي (v13.2 - ثابت) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+        logger.info("Startup message sent successfully.")
+    except Exception as e:
+        logger.error(f"Failed to send startup message: {e}")
+
 async def main():
     if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN or 'YOUR_TELEGRAM' in TELEGRAM_CHAT_ID:
         logger.critical("FATAL ERROR: Bot token or chat ID are not set.")
@@ -526,21 +573,20 @@ async def main():
         dp.bot_data['loop'] = loop
         dp.bot_data['session'] = session
         
-        mexc_client_bg = MexcClient(session) # Default client for background tasks
+        mexc_client_bg = MexcClient(session)
         
         dp.add_handler(CommandHandler("start", start_command))
         dp.add_handler(MessageHandler(Filters.text & (~Filters.command), handle_button_press))
         
         tasks = [
-            # Running one WebSocket client for simplicity. Can be expanded.
             asyncio.create_task(run_websocket_client(mexc_client_bg)),
-            # All other tasks would be added here
-            asyncio.create_task(performance_tracker_loop(session)), # Pass session to create clients
+            asyncio.create_task(performance_tracker_loop(session)),
+            # Add other background tasks here if needed
         ]
 
-        updater.start_polling(clean=True)
+        updater.start_polling(drop_pending_updates=True) # Updated parameter
         logger.info("Telegram bot is now polling for commands...")
-        # send_startup_message is called from start_command
+        send_startup_message() # Restored startup message
         await asyncio.gather(*tasks)
 
 if __name__ == '__main__':
