@@ -18,7 +18,7 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# --- إعدادات رادار الحيتان ---
+# --- جديد: إعدادات رادار الحيتان ---
 WHALE_GEM_MAX_PRICE = 0.50
 WHALE_GEM_MIN_VOLUME_24H = 100000
 WHALE_GEM_MAX_VOLUME_24H = 7000000
@@ -26,7 +26,7 @@ WHALE_WALL_THRESHOLD_USDT = 25000
 WHALE_PRESSURE_RATIO = 3.0
 WHALE_SCAN_CANDIDATE_LIMIT = 50
 
-# --- إعدادات كاشف الزخم ---
+# --- إعدادات كاشف الزخم (من الكود الأصلي) ---
 MOMENTUM_MAX_PRICE = 0.10
 MOMENTUM_MIN_VOLUME_24H = 50000
 MOMENTUM_MAX_VOLUME_24H = 2000000
@@ -35,12 +35,7 @@ MOMENTUM_PRICE_INCREASE = 4.0
 MOMENTUM_KLINE_INTERVAL = '5m'
 MOMENTUM_KLINE_LIMIT = 12
 
-# --- إعدادات الرصد اللحظي الآلي ---
-INSTANT_TIMEFRAME_SECONDS = 10
-INSTANT_VOLUME_THRESHOLD_USDT = 50000
-INSTANT_TRADE_COUNT_THRESHOLD = 20
-
-# --- إعدادات المهام الدورية الأخرى ---
+# --- إعدادات المهام الدورية (من الكود الأصلي) ---
 RUN_FOMO_SCAN_EVERY_MINUTES = 15
 TOP_GAINERS_CANDIDATE_LIMIT = 200
 RUN_LISTING_SCAN_EVERY_SECONDS = 60
@@ -49,6 +44,9 @@ PERFORMANCE_TRACKING_DURATION_HOURS = 24
 PRICE_VELOCITY_THRESHOLD = 30.0
 VOLUME_SPIKE_MULTIPLIER = 10
 MIN_USDT_VOLUME = 500000
+INSTANT_TIMEFRAME_SECONDS = 10
+INSTANT_VOLUME_THRESHOLD_USDT = 50000
+INSTANT_TRADE_COUNT_THRESHOLD = 20
 
 # --- إعدادات أخرى ---
 MEXC_API_BASE_URL = "https://api.mexc.com"
@@ -173,25 +171,6 @@ def send_instant_alert(symbol, total_volume, trade_count):
 # =============================================================================
 # 3. محركات التحليل (للاستخدام الداخلي)
 # =============================================================================
-async def analyze_order_book_for_whales(book, symbol):
-    signals = []
-    if not book or not book.get('bids') or not book.get('asks'): return signals
-    try:
-        bids = sorted([(float(p), float(q)) for p, q in book['bids']], key=lambda x: x[0], reverse=True)
-        asks = sorted([(float(p), float(q)) for p, q in book['asks']], key=lambda x: x[0])
-        for price, qty in bids[:5]:
-            value = price * qty
-            if value >= WHALE_WALL_THRESHOLD_USDT: signals.append({'type': 'Buy Wall', 'value': value, 'price': price}); break
-        for price, qty in asks[:5]:
-            value = price * qty
-            if value >= WHALE_WALL_THRESHOLD_USDT: signals.append({'type': 'Sell Wall', 'value': value, 'price': price}); break
-        bids_value = sum(p * q for p, q in bids[:10]); asks_value = sum(p * q for p, q in asks[:10])
-        if asks_value > 0 and (bids_value / asks_value) >= WHALE_PRESSURE_RATIO: signals.append({'type': 'Buy Pressure', 'value': bids_value / asks_value})
-        elif bids_value > 0 and (asks_value / bids_value) >= WHALE_PRESSURE_RATIO: signals.append({'type': 'Sell Pressure', 'value': asks_value / bids_value})
-    except Exception as e:
-        logger.warning(f"Could not analyze order book for {symbol}: {e}")
-    return signals
-
 async def get_whale_signals(session: aiohttp.ClientSession):
     market_data = await get_market_data(session)
     if not market_data: return None, "⚠️ تعذر جلب بيانات السوق."
@@ -232,10 +211,29 @@ async def get_momentum_signals(session: aiohttp.ClientSession):
             end_p = float(klines[-1][4])
             price_change = ((end_p - start_p) / start_p) * 100
             if new_v > old_v * MOMENTUM_VOLUME_INCREASE and price_change > MOMENTUM_PRICE_INCREASE:
-                coin_data = {'symbol': potential_coins[i]['symbol'], 'price_change': price_change, 'current_price': end_p, 'peak_volume': new_v}
+                coin_data = {'symbol': potential_coins[i]['symbol'], 'price_change': price_change, 'current_price': end_p}
                 momentum_coins.append(coin_data)
         except (ValueError, IndexError): continue
     return momentum_coins, None
+
+async def analyze_order_book_for_whales(book, symbol):
+    signals = []
+    if not book or not book.get('bids') or not book.get('asks'): return signals
+    try:
+        bids = sorted([(float(p), float(q)) for p, q in book['bids']], key=lambda x: x[0], reverse=True)
+        asks = sorted([(float(p), float(q)) for p, q in book['asks']], key=lambda x: x[0])
+        for price, qty in bids[:5]:
+            value = price * qty
+            if value >= WHALE_WALL_THRESHOLD_USDT: signals.append({'type': 'Buy Wall', 'value': value, 'price': price}); break
+        for price, qty in asks[:5]:
+            value = price * qty
+            if value >= WHALE_WALL_THRESHOLD_USDT: signals.append({'type': 'Sell Wall', 'value': value, 'price': price}); break
+        bids_value = sum(p * q for p, q in bids[:10]); asks_value = sum(p * q for p, q in asks[:10])
+        if asks_value > 0 and (bids_value / asks_value) >= WHALE_PRESSURE_RATIO: signals.append({'type': 'Buy Pressure', 'value': bids_value / asks_value})
+        elif bids_value > 0 and (asks_value / bids_value) >= WHALE_PRESSURE_RATIO: signals.append({'type': 'Sell Pressure', 'value': asks_value / bids_value})
+    except Exception as e:
+        logger.warning(f"Could not analyze order book for {symbol}: {e}")
+    return signals
 
 # =============================================================================
 # 4. الوظائف التفاعلية والأزرار
@@ -259,10 +257,10 @@ def build_menu():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def start_command(update, context):
-    welcome_message = ("✅ **بوت التداول الذكي (v13.3) جاهز!**\n\n"
+    welcome_message = ("✅ **بوت التداول الذكي (v14) جاهز!**\n\n"
                        "**ترقية الذكاء التحليلي:**\n"
-                       "- زر `💡 تأكيد الإشارة` أصبح الآن يرصد **الفرص الذهبية** و**تحذيرات التباين** الخطيرة.\n\n"
-                       "جميع الميزات والأزرار السابقة تعمل كما هي.")
+                       "- زر `💡 تأكيد الإشارة` أصبح الآن يرصد **الفرص الذهبية** و**تحذيرات التباين**.\n\n"
+                       "**إصلاح:** تم إصلاح مشكلة كاشف الزخم وعاد للعمل بكامل كفاءته.")
     update.message.reply_text(welcome_message, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
 
 def handle_button_press(update, context):
@@ -279,7 +277,6 @@ def handle_button_press(update, context):
     elif button_text == BTN_WHALE_RADAR:
         task = run_whale_radar_scan_command(context, chat_id, sent_message.message_id, session)
     elif button_text == BTN_MOMENTUM:
-        # --- FIX: Call the original, monolithic function for maximum stability ---
         task = run_momentum_detector_command(context, chat_id, sent_message.message_id, session)
     elif button_text == BTN_PERFORMANCE:
         task = get_performance_report(context, chat_id, sent_message.message_id, session)
@@ -313,7 +310,7 @@ async def run_whale_radar_scan_command(context, chat_id, message_id, session: ai
     context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
 async def run_momentum_detector_command(context, chat_id, message_id, session: aiohttp.ClientSession):
-    # This is the fully restored, working function from v12.2
+    # This is the original, fully working function from v10
     initial_text = "🚀 **كاشف الزخم (فائق السرعة)**\n\n🔍 جارِ الفحص المتوازي للسوق..."
     try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
     except Exception: pass
@@ -364,22 +361,16 @@ async def run_confirmation_scan(context, chat_id, message_id, session: aiohttp.C
     momentum_coins, error2 = await get_momentum_signals(session)
     if error1 or error2:
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=error1 or error2); return
-    
     positive_whale_symbols = {symbol for symbol, signals in whale_signals.items() if any(s['type'] in ['Buy Wall', 'Buy Pressure'] for s in signals)}
     negative_whale_symbols = {symbol for symbol, signals in whale_signals.items() if any(s['type'] in ['Sell Wall', 'Sell Pressure'] for s in signals)}
     momentum_symbols = {coin['symbol'] for coin in momentum_coins}
-    
     confirmed_golden = positive_whale_symbols.intersection(momentum_symbols)
     confirmed_divergence = negative_whale_symbols.intersection(momentum_symbols)
-    
     if not confirmed_golden and not confirmed_divergence:
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **التحليل الذكي اكتمل:** لم يتم العثور على إشارات متقاطعة (توافق أو تباين) حالياً."); return
-
     message = f"💡 **التحليل الذكي - {datetime.now().strftime('%H:%M:%S')}** 💡\n\n"
-    
     if confirmed_golden:
-        message += "🎯 **الفرص الذهبية (توافق إيجابي)** 🎯\n"
-        message += "_النية والفعل متوافقان على الصعود._\n\n"
+        message += "🎯 **الفرص الذهبية (توافق إيجابي)** 🎯\n_النية والفعل متوافقان على الصعود._\n\n"
         for symbol in confirmed_golden:
             symbol_name = symbol.replace('USDT', '')
             message += f"🟢 **${symbol_name}**\n"
@@ -389,10 +380,8 @@ async def run_confirmation_scan(context, chat_id, message_id, session: aiohttp.C
                 else: message += f"   - `نية الحوت:` ضغط شراء `{whale_evidence['value']:.1f}x`\n"
             momentum_evidence = next((c for c in momentum_coins if c['symbol'] == symbol), None)
             if momentum_evidence: message += f"   - `الفعل الحالي:` زخم صعود `%{momentum_evidence['price_change']:+.2f}`\n\n"
-            
     if confirmed_divergence:
-        message += "⚠️ **تحذيرات التباين (فخ محتمل)** ⚠️\n"
-        message += "_السعر يصعد لكن الحيتان ينوون البيع._\n\n"
+        message += "⚠️ **تحذيرات التباين (فخ محتمل)** ⚠️\n_السعر يصعد لكن الحيتان ينوون البيع._\n\n"
         for symbol in confirmed_divergence:
             symbol_name = symbol.replace('USDT', '')
             message += f"🔴 **${symbol_name}**\n"
@@ -402,7 +391,6 @@ async def run_confirmation_scan(context, chat_id, message_id, session: aiohttp.C
                 else: message += f"   - `نية الحوت:` ضغط بيع `{whale_evidence['value']:.1f}x`\n"
             momentum_evidence = next((c for c in momentum_coins if c['symbol'] == symbol), None)
             if momentum_evidence: message += f"   - `الفعل الحالي:` زخم صعود `%{momentum_evidence['price_change']:+.2f}`\n\n"
-            
     context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
 async def get_top_10_list(context, chat_id, message_id, list_type, session: aiohttp.ClientSession):
@@ -617,7 +605,7 @@ async def get_performance_report(context, chat_id, message_id, session: aiohttp.
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v13.3) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v14) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e: logger.error(f"Failed to send startup message: {e}")
