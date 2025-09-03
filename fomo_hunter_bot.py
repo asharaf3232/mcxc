@@ -330,11 +330,10 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v14.4 - AI Recs) جاهز!**\n\n"
+        "✅ **بوت التداول الذكي (v14.5 - Dynamic Recs) جاهز!**\n\n"
         "**ما الجديد؟**\n"
-        "- **💡 زر التوصيات الآلية:** يدمج الآن بيانات الزخم والحيتان لتوليد توصيات تداول متكاملة (دخول، هدف، وقف).\n"
-        "- **⚠️ تنبيه فقدان الزخم:** يراقب العملات المرصودة وينبهك عند هبوطها من قمتها.\n"
-        "- لوحة تحكم معاد تصميمها للوصول السريع.\n\n"
+        "- **💡 توصيات ديناميكية:** أصبحت التوصيات الآن أكثر مرونة وتعتمد على أي تقاطع بين الزخم ونشاط الحيتان لزيادة الفرص.\n"
+        "- **⚠️ تنبيه فقدان الزخم:** يراقب العملات المرصودة وينبهك عند هبوطها من قمتها.\n\n"
         "المنصة الحالية: **MEXC**")
     if update.message:
         update.message.reply_text(welcome_message, reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
@@ -501,31 +500,24 @@ async def run_automated_recommendations(context, chat_id, message_id, client: Ba
         whale_task = asyncio.create_task(helper_get_whale_activity(client))
         momentum_coins, whale_signals = await asyncio.gather(momentum_task, whale_task)
 
+        # !تعديل: نستخدم الآن أي تقاطع، تماماً مثل التحليل المتقاطع
         strong_symbols = set(momentum_coins.keys()).intersection(set(whale_signals.keys()))
         
-        # فلترة إضافية: نريد فقط الإشارات التي فيها ضغط شراء أو حائط شراء
-        final_candidates = []
-        for symbol in strong_symbols:
-            has_positive_whale_signal = any(s['type'] in ['Buy Wall', 'Buy Pressure'] for s in whale_signals[symbol])
-            if has_positive_whale_signal:
-                final_candidates.append(symbol)
-
-        if not final_candidates:
+        if not strong_symbols:
             context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **تحليل التوصيات على {client.name} اكتمل:**\n\nلا توجد فرص قوية تتوافق مع الشروط حالياً."); return
         
         message = f"💡 **أفضل التوصيات الآلية ({client.name})** 💡\n\n"
         
-        for symbol in final_candidates:
+        for symbol in strong_symbols:
             klines = await client.get_klines(symbol, RECOMMENDATION_KLINE_INTERVAL, RECOMMENDATION_KLINE_LIMIT)
             if not klines or len(klines) < 10: continue
 
             close_prices = np.array([float(k[4]) for k in klines])
             current_price = close_prices[-1]
             
-            # حساب منطقة الدخول بناءً على متوسط آخر 5 إغلاقات
             entry_zone_avg = np.mean(close_prices[-5:])
-            entry_price_low = entry_zone_avg * 0.995 # -0.5%
-            entry_price_high = entry_zone_avg * 1.005 # +0.5%
+            entry_price_low = entry_zone_avg * 0.995
+            entry_price_high = entry_zone_avg * 1.005
 
             take_profit = entry_zone_avg * (1 + RECOMMENDATION_TAKE_PROFIT_PERCENT / 100)
             stop_loss = entry_zone_avg * (1 + RECOMMENDATION_STOP_LOSS_PERCENT / 100)
@@ -680,7 +672,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v14.4 - AI Recs) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v14.5 - Dynamic Recs) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
