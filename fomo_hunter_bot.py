@@ -52,8 +52,9 @@ INSTANT_TRADE_COUNT_THRESHOLD = 20
 MEXC_API_BASE_URL = "https://api.mexc.com"
 MEXC_WS_URL = "wss://wbs.mexc.com/ws"
 COOLDOWN_PERIOD_HOURS = 2
-HTTP_TIMEOUT = 10 # Adjusted for retry mechanism
+HTTP_TIMEOUT = 10 
 API_RETRY_ATTEMPTS = 3
+API_CONCURRENCY_LIMIT = 5 # جديد: الحد الأقصى للطلبات المتزامنة
 
 # --- إعدادات تسجيل الأخطاء ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -108,7 +109,6 @@ async def get_order_book(session: aiohttp.ClientSession, symbol: str, limit: int
 # =============================================================================
 # 2. قسم الرصد اللحظي (WebSocket)
 # =============================================================================
-# ... (This section remains unchanged)
 async def handle_websocket_message(message):
     try:
         data = json.loads(message)
@@ -232,16 +232,17 @@ def handle_button_press(update, context):
     chat_id = update.message.chat_id
     loop = context.bot_data['loop']
     session = context.bot_data['session']
+    semaphore = context.bot_data['semaphore']
     if button_text == BTN_STATUS:
         status_command(update, context); return
     sent_message = context.bot.send_message(chat_id=chat_id, text="🔍 جارِ تنفيذ طلبك...")
     task = None
     if button_text == BTN_CONFIRMATION:
-        task = run_confirmation_scan(context, chat_id, sent_message.message_id, session)
+        task = run_confirmation_scan(context, chat_id, sent_message.message_id, session, semaphore)
     elif button_text == BTN_WHALE_RADAR:
-        task = run_whale_radar_scan_command(context, chat_id, sent_message.message_id, session)
+        task = run_whale_radar_scan_command(context, chat_id, sent_message.message_id, session, semaphore)
     elif button_text == BTN_MOMENTUM:
-        task = run_momentum_detector_command(context, chat_id, sent_message.message_id, session)
+        task = run_momentum_detector_command(context, chat_id, sent_message.message_id, session, semaphore)
     elif button_text == BTN_PERFORMANCE:
         task = get_performance_report(context, chat_id, sent_message.message_id, session)
     elif button_text == BTN_GAINERS:
@@ -252,7 +253,7 @@ def handle_button_press(update, context):
         task = get_top_10_list(context, chat_id, sent_message.message_id, 'volume', session)
     if task: asyncio.run_coroutine_threadsafe(task, loop)
 
-async def run_whale_radar_scan_command(context, chat_id, message_id, session: aiohttp.ClientSession):
+async def run_whale_radar_scan_command(context, chat_id, message_id, session: aiohttp.ClientSession, semaphore: asyncio.Semaphore):
     context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"🐋 **رادار الحيتان**\n\n🔍 جارِ فلترة السوق...")
     market_data = await get_market_data(session)
     if not market_data:
@@ -265,17 +266,23 @@ async def run_whale_radar_scan_command(context, chat_id, message_id, session: ai
     for p in potential_gems: p['change_float'] = float(p.get('priceChangePercent', 0))
     top_gems = sorted(potential_gems, key=lambda x: x['change_float'], reverse=True)[:WHALE_SCAN_CANDIDATE_LIMIT]
     
-    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"🐋 **رادار الحيتان**\n\n🔍 جارِ فحص دفاتر أوامر {len(top_gems)} عملة...")
-    tasks = [get_order_book(session, p['symbol']) for p in top_gems]
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"🐋 **رادار الحيتان**\n\n🔍 جارِ فحص دفاتر أوامر {len(top_gems)} عملة (بشكل منظم)...")
+    
+    async def fetch_book(symbol):
+        async with semaphore:
+            return await get_order_book(session, symbol)
+
+    tasks = [fetch_book(p['symbol']) for p in top_gems]
     all_order_books = await asyncio.gather(*tasks)
     
     all_signals = []
     for i, book in enumerate(all_order_books):
-        symbol = top_gems[i]['symbol']
-        signals = await analyze_order_book_for_whales(book, symbol)
-        if signals:
-            for signal in signals:
-                signal['symbol'] = symbol; all_signals.append(signal)
+        if book:
+            symbol = top_gems[i]['symbol']
+            signals = await analyze_order_book_for_whales(book, symbol)
+            if signals:
+                for signal in signals:
+                    signal['symbol'] = symbol; all_signals.append(signal)
 
     if not all_signals:
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **فحص الرادار اكتمل:** لا يوجد نشاط حيتان واضح حالياً."); return
@@ -290,8 +297,8 @@ async def run_whale_radar_scan_command(context, chat_id, message_id, session: ai
         elif signal['type'] == 'Sell Pressure': message += f"📉 **ضغط بيع عالٍ على ${symbol_name}**\n    - النسبة: `{signal['value']:.1f}x`\n\n"
     context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
-async def run_momentum_detector_command(context, chat_id, message_id, session: aiohttp.ClientSession):
-    initial_text = "🚀 **كاشف الزخم (فائق السرعة)**\n\n🔍 جارِ الفحص المتوازي للسوق..."
+async def run_momentum_detector_command(context, chat_id, message_id, session: aiohttp.ClientSession, semaphore: asyncio.Semaphore):
+    initial_text = "🚀 **كاشف الزخم**\n\n🔍 جارِ فلترة السوق..."
     try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
     except Exception: pass
     market_data = await get_market_data(session)
@@ -302,8 +309,16 @@ async def run_momentum_detector_command(context, chat_id, message_id, session: a
                        MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= MOMENTUM_MAX_VOLUME_24H]
     if not potential_coins:
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="لم يتم العثور على عملات ضمن المعايير الأولية."); return
-    tasks = [get_klines(session, p['symbol'], MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT) for p in potential_coins]
+    
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"🚀 **كاشف الزخم**\n\n🔍 جارِ تحليل شموع {len(potential_coins)} عملة (بشكل منظم)...")
+
+    async def fetch_klines(symbol):
+        async with semaphore:
+            return await get_klines(session, symbol, MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT)
+
+    tasks = [fetch_klines(p['symbol']) for p in potential_coins]
     all_klines_data = await asyncio.gather(*tasks)
+
     momentum_coins = []
     for i, klines in enumerate(all_klines_data):
         if not klines or len(klines) < MOMENTUM_KLINE_LIMIT: continue
@@ -334,36 +349,45 @@ async def run_momentum_detector_command(context, chat_id, message_id, session: a
     for coin in sorted_coins[:10]:
         add_to_monitoring(coin['symbol'], float(coin['current_price']), coin.get('peak_volume', 0), now, "الزخم اليدوي")
 
-async def run_confirmation_scan(context, chat_id, message_id, session: aiohttp.ClientSession):
-    # --- المنطق الجديد والموثوق للمحلل الذكي ---
-    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 1/2:** جلب نتائج رادار الحيتان...")
-    
-    # أولاً: جلب نتائج الحيتان
+async def run_confirmation_scan(context, chat_id, message_id, session: aiohttp.ClientSession, semaphore: asyncio.Semaphore):
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 1/3:** جلب بيانات السوق...")
     market_data = await get_market_data(session)
     if not market_data:
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="⚠️ تعذر جلب بيانات السوق."); return
     
-    whale_potential = [p for p in market_data if p.get('symbol','').endswith('USDT') and
-                       float(p.get('lastPrice','999')) <= WHALE_GEM_MAX_PRICE and
-                       WHALE_GEM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= WHALE_GEM_MAX_VOLUME_24H]
+    # --- المنطق الجديد: جلب كل البيانات المطلوبة ثم المقارنة ---
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 2/3:** تحليل نية الحيتان والزخم...")
     
-    whale_tasks = [get_order_book(session, p['symbol']) for p in whale_potential]
+    whale_potential = {p['symbol']:p for p in market_data if p.get('symbol','').endswith('USDT') and
+                       float(p.get('lastPrice','999')) <= WHALE_GEM_MAX_PRICE and
+                       WHALE_GEM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= WHALE_GEM_MAX_VOLUME_24H}
+
+    momentum_potential = {p['symbol']:p for p in market_data if p.get('symbol','').endswith('USDT') and
+                       float(p.get('lastPrice','1')) <= MOMENTUM_MAX_PRICE and
+                       MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= MOMENTUM_MAX_VOLUME_24H}
+
+    async def fetch_book(symbol):
+        async with semaphore: return await get_order_book(session, symbol)
+    async def fetch_klines(symbol):
+        async with semaphore: return await get_klines(session, symbol, MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT)
+
+    whale_tasks = [fetch_book(symbol) for symbol in whale_potential.keys()]
     all_order_books = await asyncio.gather(*whale_tasks)
+    whale_symbols = list(whale_potential.keys())
+    
+    kline_tasks = [fetch_klines(symbol) for symbol in momentum_potential.keys()]
+    all_klines_data = await asyncio.gather(*kline_tasks)
+    momentum_symbols_list = list(momentum_potential.keys())
+
+    # تحليل نتائج الحيتان
     whale_signals = {}
     for i, book in enumerate(all_order_books):
-        symbol = whale_potential[i]['symbol']
-        signals = await analyze_order_book_for_whales(book, symbol)
-        if signals: whale_signals[symbol] = signals
-        
-    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 2/2:** جلب نتائج كاشف الزخم...")
-
-    # ثانياً: جلب نتائج الزخم
-    momentum_potential = [p for p in market_data if p.get('symbol','').endswith('USDT') and
-                       float(p.get('lastPrice','1')) <= MOMENTUM_MAX_PRICE and
-                       MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= MOMENTUM_MAX_VOLUME_24H]
-
-    kline_tasks = [get_klines(session, p['symbol'], MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT) for p in momentum_potential]
-    all_klines_data = await asyncio.gather(*kline_tasks)
+        if book:
+            symbol = whale_symbols[i]
+            signals = await analyze_order_book_for_whales(book, symbol)
+            if signals: whale_signals[symbol] = signals
+            
+    # تحليل نتائج الزخم
     momentum_coins = []
     for i, klines in enumerate(all_klines_data):
         if not klines or len(klines) < MOMENTUM_KLINE_LIMIT: continue
@@ -377,10 +401,11 @@ async def run_confirmation_scan(context, chat_id, message_id, session: aiohttp.C
             end_p = float(klines[-1][4])
             price_change = ((end_p - start_p) / start_p) * 100
             if new_v > old_v * MOMENTUM_VOLUME_INCREASE and price_change > MOMENTUM_PRICE_INCREASE:
-                momentum_coins.append({'symbol': momentum_potential[i]['symbol'], 'price_change': price_change})
+                momentum_coins.append({'symbol': momentum_symbols_list[i], 'price_change': price_change})
         except (ValueError, IndexError): continue
     
-    # ثالثاً: مقارنة النتائج النهائية
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 3/3:** مقارنة النتائج النهائية...")
+
     positive_whale_symbols = {symbol for symbol, signals in whale_signals.items() if any(s['type'] in ['Buy Wall', 'Buy Pressure'] for s in signals)}
     negative_whale_symbols = {symbol for symbol, signals in whale_signals.items() if any(s['type'] in ['Sell Wall', 'Sell Pressure'] for s in signals)}
     momentum_symbols = {coin['symbol'] for coin in momentum_coins}
@@ -628,7 +653,7 @@ async def get_performance_report(context, chat_id, message_id, session: aiohttp.
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v16) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v17) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e: logger.error(f"Failed to send startup message: {e}")
@@ -640,7 +665,9 @@ async def main():
         updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
         dp = updater.dispatcher
         loop = asyncio.get_running_loop()
-        dp.bot_data['loop'], dp.bot_data['session'] = loop, session
+        semaphore = asyncio.Semaphore(API_CONCURRENCY_LIMIT) # إنشاء المنظم
+        dp.bot_data['loop'], dp.bot_data['session'], dp.bot_data['semaphore'] = loop, session, semaphore
+        
         dp.add_handler(CommandHandler("start", start_command))
         dp.add_handler(MessageHandler(Filters.text([BTN_CONFIRMATION, BTN_WHALE_RADAR, BTN_MOMENTUM, BTN_GAINERS,
                                                     BTN_LOSERS, BTN_VOLUME, BTN_STATUS, BTN_PERFORMANCE]), handle_button_press))
@@ -660,3 +687,4 @@ async def main():
 if __name__ == '__main__':
     try: asyncio.run(main())
     except KeyboardInterrupt: logger.info("Bot stopped manually.")
+
