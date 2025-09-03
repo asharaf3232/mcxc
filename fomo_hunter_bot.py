@@ -195,7 +195,7 @@ class BinanceClient(BaseExchangeClient):
             'symbol': item['symbol'],
             'quoteVolume': item.get('quoteVolume', '0'),
             'lastPrice': item.get('lastPrice', '0'),
-            'priceChangePercent': float(item.get('priceChangePercent', '0')) / 100
+            'priceChangePercent': float(item.get('priceChangePercent', '0'))
         } for item in data if item.get('symbol','').endswith("USDT")]
 
     async def get_klines(self, symbol, interval, limit):
@@ -325,11 +325,12 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v14.2 - Professional) جاهز!**\n\n"
+        "✅ **بوت التداول الذكي (v14.2.1 - Professional) جاهز!**\n\n"
         "**ترقية كبرى:**\n"
         "- الآن يدعم البوت **Binance**, **MEXC**, و **Gate.io**.\n"
         "- زر جديد للتحكم في تشغيل/إيقاف المهام الخلفية.\n"
-        "- لوحة تحكم ذكية تظهر اختياراتك الحالية.\n\n"
+        "- لوحة تحكم ذكية تظهر اختياراتك الحالية.\n"
+        "- تم إصلاح وتفعيل مهمة 'صياد الفومو' التلقائية.\n\n"
         "المنصة الحالية: **MEXC**")
     if update.message:
         update.message.reply_text(welcome_message, reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
@@ -484,6 +485,7 @@ async def get_performance_report(context, chat_id, message_id):
     except Exception as e:
         logger.error(f"Error in get_performance_report: {e}", exc_info=True)
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ أثناء جلب تقرير الأداء.")
+
 # =============================================================================
 # --- 5. المهام الآلية الدورية ---
 # =============================================================================
@@ -506,9 +508,39 @@ async def fomo_hunter_loop(client: BaseExchangeClient, bot_data):
     while True:
         await asyncio.sleep(RUN_FOMO_SCAN_EVERY_MINUTES * 60)
         if not bot_data.get('background_tasks_enabled', True): continue
-        logger.info(f"===== Fomo Hunter ({client.name}): Starting Scan =====")
-        # Full logic is now restored and working
-        pass
+        logger.info(f"===== Fomo Hunter ({client.name}): Starting Automatic Scan =====")
+        try:
+            momentum_coins_data = await helper_get_momentum_symbols(client)
+            if not momentum_coins_data:
+                logger.info(f"Fomo Hunter ({client.name}): No significant momentum detected.")
+                continue
+
+            now = datetime.now(UTC)
+            
+            # Filter out coins that were alerted recently
+            new_alerts = []
+            for symbol, data in momentum_coins_data.items():
+                last_alert_time = recently_alerted_fomo[client.name].get(symbol)
+                if not last_alert_time or (now - last_alert_time) > timedelta(minutes=RUN_FOMO_SCAN_EVERY_MINUTES * 4):
+                     new_alerts.append(data)
+                     recently_alerted_fomo[client.name][symbol] = now
+
+            if not new_alerts:
+                logger.info(f"Fomo Hunter ({client.name}): Found momentum coins, but they were alerted recently.")
+                continue
+
+            sorted_coins = sorted(new_alerts, key=lambda x: x['price_change'], reverse=True)
+            message = f"🚨 **تنبيه تلقائي من صياد الفومو ({client.name})** 🚨\n\n"
+            for i, coin in enumerate(sorted_coins[:5]): # Limit to top 5 to avoid spam
+                message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n   - السعر: `${format_price(coin['current_price'])}`\n   - **زخم آخر 30 دقيقة: `%{coin['price_change']:+.2f}`**\n\n")
+            
+            bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+            
+            for coin in sorted_coins[:5]:
+                add_to_monitoring(coin['symbol'], float(coin['current_price']), coin.get('peak_volume', 0), now, f"صياد الفومو ({client.name})", client.name)
+
+        except Exception as e:
+            logger.error(f"Error in fomo_hunter_loop for {client.name}: {e}", exc_info=True)
         
 async def new_listings_sniper_loop(client: BaseExchangeClient, bot_data):
     logger.info(f"New Listings Sniper background task started for {client.name}.")
@@ -543,27 +575,35 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
         await asyncio.sleep(RUN_PERFORMANCE_TRACKER_EVERY_MINUTES * 60)
         now = datetime.now(UTC)
         for platform in PLATFORMS:
+            # Create a copy of items to avoid runtime errors during iteration
             for symbol, data in list(performance_tracker[platform].items()):
                 if now - data['alert_time'] > timedelta(hours=PERFORMANCE_TRACKING_DURATION_HOURS):
-                    performance_tracker[platform][symbol]['status'] = 'Archived'
+                    if performance_tracker[platform].get(symbol):
+                         performance_tracker[platform][symbol]['status'] = 'Archived'
                     continue
                 if data.get('status') == 'Archived':
-                    del performance_tracker[platform][symbol]
+                    if performance_tracker[platform].get(symbol):
+                        del performance_tracker[platform][symbol]
                     continue
                 
-                client = get_exchange_client(platform, session)
-                current_price = await client.get_current_price(symbol)
-                if current_price:
-                    performance_tracker[platform][symbol]['current_price'] = current_price
-                    if current_price > data.get('high_price', 0):
-                        performance_tracker[platform][symbol]['high_price'] = current_price
+                try:
+                    client = get_exchange_client(platform, session)
+                    current_price = await client.get_current_price(symbol)
+                    if current_price:
+                        if performance_tracker[platform].get(symbol):
+                           performance_tracker[platform][symbol]['current_price'] = current_price
+                           if current_price > data.get('high_price', 0):
+                               performance_tracker[platform][symbol]['high_price'] = current_price
+                except Exception as e:
+                    logger.error(f"Error updating price for {symbol} on {platform}: {e}")
+
 
 # =============================================================================
 # --- 6. تشغيل البوت ---
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v14.2 - Professional) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v14.2.1 - Professional) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
@@ -602,5 +642,3 @@ if __name__ == '__main__':
     try: asyncio.run(main())
     except KeyboardInterrupt: logger.info("Bot stopped manually.")
     except Exception as e: logger.critical(f"Bot failed to run: {e}", exc_info=True)
-
-
