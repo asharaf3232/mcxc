@@ -50,12 +50,13 @@ PRICE_VELOCITY_THRESHOLD = 30.0
 VOLUME_SPIKE_MULTIPLIER = 10
 MIN_USDT_VOLUME = 500000
 
-
 # --- إعدادات أخرى ---
 MEXC_API_BASE_URL = "https://api.mexc.com"
 MEXC_WS_URL = "wss://wbs.mexc.com/ws"
 COOLDOWN_PERIOD_HOURS = 2
 HTTP_TIMEOUT = 15
+# *** جديد: التحكم في عدد الطلبات المتزامنة لتجنب خطأ 429 ***
+API_CONCURRENCY_LIMIT = 10 # عدد الطلبات التي يمكن إرسالها في نفس الوقت
 
 # --- إعدادات تسجيل الأخطاء ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -70,22 +71,46 @@ known_symbols, active_hunts, performance_tracker = set(), {}, {}
 activity_tracker = {}
 activity_lock = asyncio.Lock()
 
+# *** جديد: إنشاء كائن Semaphore للتحكم في الطلبات ***
+api_semaphore = asyncio.Semaphore(API_CONCURRENCY_LIMIT)
+
 # =============================================================================
 # 1. قسم الشبكة والوظائف الأساسية
 # =============================================================================
-async def fetch_json(session: aiohttp.ClientSession, url: str, params: dict = None):
-    try:
-        async with session.get(url, params=params, timeout=HTTP_TIMEOUT, headers={'User-Agent': 'Mozilla/5.0'}) as response:
-            response.raise_for_status(); return await response.json()
-    except Exception as e:
-        logger.error(f"Error fetching {url}: {e}"); return None
+async def fetch_json(session: aiohttp.ClientSession, url: str, params: dict = None, retries: int = 3):
+    """
+    دالة محسنة لجلب البيانات مع آلية إعادة المحاولة عند الخطأ، خاصة خطأ 429.
+    """
+    for attempt in range(retries):
+        try:
+            async with session.get(url, params=params, timeout=HTTP_TIMEOUT, headers={'User-Agent': 'Mozilla/5.0'}) as response:
+                if response.status == 429:
+                    logger.warning(f"Rate limit hit (429) for {url}. Waiting for {2 ** attempt}s before retrying.")
+                    await asyncio.sleep(2 ** attempt) # انتظار أطول مع كل محاولة فاشلة
+                    continue # إعادة المحاولة
+                response.raise_for_status()
+                return await response.json()
+        except aiohttp.ClientError as e:
+            logger.error(f"ClientError fetching {url} on attempt {attempt + 1}: {e}")
+            if attempt < retries - 1:
+                await asyncio.sleep(1) # انتظار قصير للأخطاء العامة
+            else:
+                return None # فشلت كل المحاولات
+        except Exception as e:
+            logger.error(f"Unexpected error fetching {url}: {e}")
+            return None
+    return None
 
 async def get_market_data(session: aiohttp.ClientSession):
     return await fetch_json(session, f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr")
 
 async def get_klines(session: aiohttp.ClientSession, symbol: str, interval: str, limit: int):
-    params = {'symbol': symbol, 'interval': interval, 'limit': limit}
-    return await fetch_json(session, f"{MEXC_API_BASE_URL}/api/v3/klines", params=params)
+    # *** تعديل: استخدام Semaphore للتحكم في هذا الطلب ***
+    async with api_semaphore:
+        params = {'symbol': symbol, 'interval': interval, 'limit': limit}
+        data = await fetch_json(session, f"{MEXC_API_BASE_URL}/api/v3/klines", params=params)
+        await asyncio.sleep(0.1) # إضافة تأخير بسيط جداً بين الطلبات لتخفيف الضغط
+        return data
 
 async def get_current_price(session: aiohttp.ClientSession, symbol: str) -> float | None:
     data = await fetch_json(session, f"{MEXC_API_BASE_URL}/api/v3/ticker/price", {'symbol': symbol})
@@ -97,8 +122,14 @@ def format_price(price_str):
     except (ValueError, TypeError): return price_str
     
 async def get_order_book(session: aiohttp.ClientSession, symbol: str, limit: int = 20):
-    params = {'symbol': symbol, 'limit': limit}
-    return await fetch_json(session, f"{MEXC_API_BASE_URL}/api/v3/depth", params)
+    async with api_semaphore:
+        params = {'symbol': symbol, 'limit': limit}
+        data = await fetch_json(session, f"{MEXC_API_BASE_URL}/api/v3/depth", params)
+        await asyncio.sleep(0.1)
+        return data
+
+# ... باقي أقسام الكود تبقى كما هي إلى حد كبير ...
+# The rest of the code sections remain largely the same.
 
 # =============================================================================
 # 2. قسم الرصد اللحظي (WebSocket)
@@ -116,7 +147,9 @@ async def handle_websocket_message(message):
                     async with activity_lock:
                         if symbol not in activity_tracker: activity_tracker[symbol] = deque(maxlen=200)
                         activity_tracker[symbol].append({'v': volume_usdt, 't': timestamp})
-    except (json.JSONDecodeError, KeyError, ValueError): pass
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        # تحسين: تسجيل الخطأ بدلاً من تجاهله بصمت
+        logger.warning(f"Could not parse WebSocket message: {message}. Error: {e}")
 
 async def run_websocket_client():
     logger.info("Starting WebSocket client...")
@@ -132,6 +165,9 @@ async def run_websocket_client():
                         await handle_websocket_message(message)
                     except asyncio.TimeoutError:
                         await websocket.send(json.dumps({"method": "PING"}))
+                    except websockets.ConnectionClosed:
+                        logger.warning("WebSocket connection closed unexpectedly. Reconnecting...")
+                        break # الخروج من الحلقة الداخلية لإعادة الاتصال
         except Exception as e:
             logger.error(f"WebSocket connection error: {e}. Reconnecting in 10s...")
             await asyncio.sleep(10)
@@ -156,8 +192,8 @@ async def periodic_activity_checker():
                 total_volume = sum(trade['v'] for trade in trades)
                 trade_count = len(trades)
                 if (total_volume >= INSTANT_VOLUME_THRESHOLD_USDT and
-                        trade_count >= INSTANT_TRADE_COUNT_THRESHOLD and
-                        symbol not in recently_alerted_instant):
+                    trade_count >= INSTANT_TRADE_COUNT_THRESHOLD and
+                    symbol not in recently_alerted_instant):
                     send_instant_alert(symbol, total_volume, trade_count)
                     recently_alerted_instant[symbol] = now_ts
                     del activity_tracker[symbol]
@@ -194,10 +230,11 @@ def build_menu():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def start_command(update, context):
-    welcome_message = ("✅ **بوت التداول الذكي (v12.2) جاهز!**\n\n"
+    welcome_message = ("✅ **بوت التداول الذكي (v12.3 - معالج الأخطاء) جاهز!**\n\n"
                        "**ترقية رئيسية:**\n"
-                       "- **جديد:** زر `🐋 رادار الحيتان` لإجراء فحص يدوي واستباقي لنوايا الحيتان عبر تحليل دفاتر الأوامر للعملات الواعدة.\n\n"
-                       "جميع الميزات السابقة تعمل كما هي. استخدم الأزرار للتحليل الفوري.")
+                       "- **إدارة ذكية للطلبات:** تم تحسين البوت لتجنب خطأ `Too Many Requests (429)` عبر تنظيم الطلبات المرسلة للمنصة.\n"
+                       "- **استقرار أعلى:** تحسين آلية إعادة الاتصال بالـ WebSocket ومعالجة أفضل للأخطاء.\n\n"
+                       "جميع الميزات تعمل بشكل أكثر موثوقية الآن.")
     update.message.reply_text(welcome_message, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
 
 def status_command(update, context):
@@ -259,8 +296,11 @@ async def get_top_10_list(context, chat_id, message_id, list_type, session: aioh
         logger.error(f"Error in get_top_10_list for {list_type}: {e}")
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ أثناء جلب البيانات.")
 
+# ... (The rest of the analysis functions like run_momentum_detector, run_whale_radar_scan, etc. will use the modified get_klines and get_order_book, which automatically handles rate limiting thanks to the semaphore.)
+
+# ... The following functions are copied from the original file but will now benefit from the throttled API calls.
 async def run_momentum_detector(context, chat_id, message_id, session: aiohttp.ClientSession):
-    initial_text = "🚀 **كاشف الزخم (فائق السرعة)**\n\n🔍 جارِ الفحص المتوازي للسوق..."
+    initial_text = "🚀 **كاشف الزخم (فائق السرعة)**\n\n🔍 جارِ الفحص المنظم للسوق (لتجنب الحظر)..."
     try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
     except Exception: pass
     market_data = await get_market_data(session)
@@ -271,8 +311,10 @@ async def run_momentum_detector(context, chat_id, message_id, session: aiohttp.C
                        MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= MOMENTUM_MAX_VOLUME_24H]
     if not potential_coins:
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="لم يتم العثور على عملات ضمن المعايير الأولية."); return
+    
     tasks = [get_klines(session, p['symbol'], MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT) for p in potential_coins]
     all_klines_data = await asyncio.gather(*tasks)
+    
     momentum_coins = []
     for i, klines in enumerate(all_klines_data):
         if not klines or len(klines) < MOMENTUM_KLINE_LIMIT: continue
@@ -302,7 +344,7 @@ async def run_momentum_detector(context, chat_id, message_id, session: aiohttp.C
     now = datetime.now(UTC)
     for coin in sorted_coins[:10]:
         add_to_monitoring(coin['symbol'], float(coin['current_price']), coin.get('peak_volume', 0), now, "الزخم اليدوي")
-    
+        
 async def analyze_order_book_for_whales(book, symbol):
     signals = []
     if not book or not book.get('bids') or not book.get('asks'): return signals
@@ -335,8 +377,8 @@ async def run_whale_radar_scan(context, chat_id, message_id, session: aiohttp.Cl
     if not market_data:
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="⚠️ تعذر جلب بيانات السوق."); return
     potential_gems = [p for p in market_data if p.get('symbol','').endswith('USDT') and
-                       float(p.get('lastPrice','999')) <= WHALE_GEM_MAX_PRICE and
-                       WHALE_GEM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= WHALE_GEM_MAX_VOLUME_24H]
+                      float(p.get('lastPrice','999')) <= WHALE_GEM_MAX_PRICE and
+                      WHALE_GEM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= WHALE_GEM_MAX_VOLUME_24H]
     if not potential_gems:
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **فحص الرادار اكتمل:** لم يتم العثور على عملات تطابق معايير البحث حالياً."); return
     for p in potential_gems: p['change_float'] = float(p.get('priceChangePercent', 0))
@@ -359,18 +401,18 @@ async def run_whale_radar_scan(context, chat_id, message_id, session: aiohttp.Cl
         symbol_name = signal['symbol'].replace('USDT', '')
         if signal['type'] == 'Buy Wall':
             message += (f"🟢 **حائط شراء ضخم على ${symbol_name}**\n"
-                        f"    - **الحجم:** `${signal['value']:,.0f}` USDT\n"
-                        f"    - **عند سعر:** `{format_price(signal['price'])}`\n\n")
+                        f"   - **الحجم:** `${signal['value']:,.0f}` USDT\n"
+                        f"   - **عند سعر:** `{format_price(signal['price'])}`\n\n")
         elif signal['type'] == 'Sell Wall':
             message += (f"🔴 **حائط بيع ضخم على ${symbol_name}**\n"
-                        f"    - **الحجم:** `${signal['value']:,.0f}` USDT\n"
-                        f"    - **عند سعر:** `{format_price(signal['price'])}`\n\n")
+                        f"   - **الحجم:** `${signal['value']:,.0f}` USDT\n"
+                        f"   - **عند سعر:** `{format_price(signal['price'])}`\n\n")
         elif signal['type'] == 'Buy Pressure':
             message += (f"📈 **ضغط شراء عالٍ على ${symbol_name}**\n"
-                        f"    - **النسبة:** الشراء يفوق البيع بـ `{signal['value']:.1f}x`\n\n")
+                        f"   - **النسبة:** الشراء يفوق البيع بـ `{signal['value']:.1f}x`\n\n")
         elif signal['type'] == 'Sell Pressure':
             message += (f"📉 **ضغط بيع عالٍ على ${symbol_name}**\n"
-                        f"    - **النسبة:** البيع يفوق الشراء بـ `{signal['value']:.1f}x`\n\n")
+                        f"   - **النسبة:** البيع يفوق الشراء بـ `{signal['value']:.1f}x`\n\n")
     context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
 # =============================================================================
@@ -554,7 +596,7 @@ async def get_performance_report(context, chat_id, message_id, session: aiohttp.
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v12.2 - رادار يدوي) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v12.3 - معالج الأخطاء) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e: logger.error(f"Failed to send startup message: {e}")
@@ -570,7 +612,7 @@ async def main():
         dp.bot_data['loop'], dp.bot_data['session'] = loop, session
         dp.add_handler(CommandHandler("start", start_command))
         dp.add_handler(MessageHandler(Filters.text([BTN_WHALE_RADAR, BTN_MOMENTUM, BTN_GAINERS, BTN_LOSERS, 
-                                                    BTN_VOLUME, BTN_STATUS, BTN_PERFORMANCE]), handle_button_press))
+                                                     BTN_VOLUME, BTN_STATUS, BTN_PERFORMANCE]), handle_button_press))
         tasks = [asyncio.create_task(run_websocket_client()),
                  asyncio.create_task(periodic_activity_checker()),
                  asyncio.create_task(fomo_hunter_loop(session)),
