@@ -56,7 +56,10 @@ MEXC_WS_URL = "wss://wbs.mexc.com/ws"
 COOLDOWN_PERIOD_HOURS = 2
 HTTP_TIMEOUT = 15
 # *** جديد: التحكم في عدد الطلبات المتزامنة لتجنب خطأ 429 ***
-API_CONCURRENCY_LIMIT = 10 # عدد الطلبات التي يمكن إرسالها في نفس الوقت
+# منصة MEXC تسمح بـ 20 طلب/ثانية لهذه الأنواع من البيانات.
+# القيمة 15 هي قيمة آمنة وسريعة جداً. يمكنك زيادتها إلى 18-19 إذا أردت
+# ولكن لا تتجاوز 20 لتجنب الحظر المؤقت.
+API_CONCURRENCY_LIMIT = 15 # عدد الطلبات التي يمكن إرسالها في نفس الوقت
 
 # --- إعدادات تسجيل الأخطاء ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
