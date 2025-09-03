@@ -18,7 +18,7 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# --- جديد: إعدادات رادار الحيتان ---
+# --- إعدادات رادار الحيتان ---
 WHALE_GEM_MAX_PRICE = 0.50
 WHALE_GEM_MIN_VOLUME_24H = 100000
 WHALE_GEM_MAX_VOLUME_24H = 7000000
@@ -26,7 +26,7 @@ WHALE_WALL_THRESHOLD_USDT = 25000
 WHALE_PRESSURE_RATIO = 3.0
 WHALE_SCAN_CANDIDATE_LIMIT = 50
 
-# --- إعدادات كاشف الزخم (من الكود الأصلي) ---
+# --- إعدادات كاشف الزخم ---
 MOMENTUM_MAX_PRICE = 0.10
 MOMENTUM_MIN_VOLUME_24H = 50000
 MOMENTUM_MAX_VOLUME_24H = 2000000
@@ -35,7 +35,7 @@ MOMENTUM_PRICE_INCREASE = 4.0
 MOMENTUM_KLINE_INTERVAL = '5m'
 MOMENTUM_KLINE_LIMIT = 12
 
-# --- إعدادات المهام الدورية (من الكود الأصلي) ---
+# --- إعدادات المهام الدورية ---
 RUN_FOMO_SCAN_EVERY_MINUTES = 15
 TOP_GAINERS_CANDIDATE_LIMIT = 200
 RUN_LISTING_SCAN_EVERY_SECONDS = 60
@@ -138,8 +138,7 @@ async def periodic_activity_checker():
         await asyncio.sleep(5)
         now_ts = datetime.now(UTC).timestamp()
         for sym in list(recently_alerted_instant.keys()):
-            if now_ts - recently_alerted_instant[sym] > COOLDOWN_PERIOD_HOURS * 3600:
-                del recently_alerted_instant[sym]
+            if now_ts - recently_alerted_instant[sym] > COOLDOWN_PERIOD_HOURS * 3600: del recently_alerted_instant[sym]
         symbols_to_check = list(activity_tracker.keys())
         async with activity_lock:
             for symbol in symbols_to_check:
@@ -169,53 +168,8 @@ def send_instant_alert(symbol, total_volume, trade_count):
         logger.error(f"Failed to send instant alert for {symbol}: {e}")
 
 # =============================================================================
-# 3. محركات التحليل (للاستخدام الداخلي)
+# 3. محركات التحليل
 # =============================================================================
-async def get_whale_signals(session: aiohttp.ClientSession):
-    market_data = await get_market_data(session)
-    if not market_data: return None, "⚠️ تعذر جلب بيانات السوق."
-    potential_gems = [p for p in market_data if p.get('symbol','').endswith('USDT') and
-                       float(p.get('lastPrice','999')) <= WHALE_GEM_MAX_PRICE and
-                       WHALE_GEM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= WHALE_GEM_MAX_VOLUME_24H]
-    if not potential_gems: return {}, None
-    for p in potential_gems: p['change_float'] = float(p.get('priceChangePercent', 0))
-    top_gems = sorted(potential_gems, key=lambda x: x['change_float'], reverse=True)[:WHALE_SCAN_CANDIDATE_LIMIT]
-    tasks = [get_order_book(session, p['symbol']) for p in top_gems]
-    all_order_books = await asyncio.gather(*tasks)
-    whale_signals = {}
-    for i, book in enumerate(all_order_books):
-        symbol = top_gems[i]['symbol']
-        signals = await analyze_order_book_for_whales(book, symbol)
-        if signals: whale_signals[symbol] = signals
-    return whale_signals, None
-
-async def get_momentum_signals(session: aiohttp.ClientSession):
-    market_data = await get_market_data(session)
-    if not market_data: return None, "⚠️ تعذر جلب بيانات السوق."
-    potential_coins = [p for p in market_data if p.get('symbol','').endswith('USDT') and
-                       float(p.get('lastPrice','1')) <= MOMENTUM_MAX_PRICE and
-                       MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= MOMENTUM_MAX_VOLUME_24H]
-    if not potential_coins: return [], None
-    tasks = [get_klines(session, p['symbol'], MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT) for p in potential_coins]
-    all_klines_data = await asyncio.gather(*tasks)
-    momentum_coins = []
-    for i, klines in enumerate(all_klines_data):
-        if not klines or len(klines) < MOMENTUM_KLINE_LIMIT: continue
-        try:
-            sp = MOMENTUM_KLINE_LIMIT // 2
-            old_v = sum(float(k[5]) for k in klines[:sp]);
-            if old_v == 0: continue
-            new_v = sum(float(k[5]) for k in klines[sp:])
-            start_p = float(klines[sp][1]);
-            if start_p == 0: continue
-            end_p = float(klines[-1][4])
-            price_change = ((end_p - start_p) / start_p) * 100
-            if new_v > old_v * MOMENTUM_VOLUME_INCREASE and price_change > MOMENTUM_PRICE_INCREASE:
-                coin_data = {'symbol': potential_coins[i]['symbol'], 'price_change': price_change, 'current_price': end_p}
-                momentum_coins.append(coin_data)
-        except (ValueError, IndexError): continue
-    return momentum_coins, None
-
 async def analyze_order_book_for_whales(book, symbol):
     signals = []
     if not book or not book.get('bids') or not book.get('asks'): return signals
@@ -238,7 +192,7 @@ async def analyze_order_book_for_whales(book, symbol):
 # =============================================================================
 # 4. الوظائف التفاعلية والأزرار
 # =============================================================================
-BTN_CONFIRMATION = "💡 تأكيد الإشارة"
+BTN_CONFIRMATION = "💡 المحلل الذكي"
 BTN_WHALE_RADAR = "🐋 رادار الحيتان"
 BTN_MOMENTUM = "🚀 كاشف الزخم"
 BTN_GAINERS = "📈 الأكثر ارتفاعاً"
@@ -257,10 +211,10 @@ def build_menu():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def start_command(update, context):
-    welcome_message = ("✅ **بوت التداول الذكي (v14) جاهز!**\n\n"
-                       "**ترقية الذكاء التحليلي:**\n"
-                       "- زر `💡 تأكيد الإشارة` أصبح الآن يرصد **الفرص الذهبية** و**تحذيرات التباين**.\n\n"
-                       "**إصلاح:** تم إصلاح مشكلة كاشف الزخم وعاد للعمل بكامل كفاءته.")
+    welcome_message = ("✅ **بوت التداول الذكي (v16) جاهز!**\n\n"
+                       "**ترقية المنطق التحليلي:**\n"
+                       "- `💡 المحلل الذكي` يستخدم الآن منهجية بحث موحدة لضمان دقة النتائج ورصد **الفرص الذهبية** و**تحذيرات التباين** بشكل فعال.\n\n"
+                       "جميع الوظائف الأخرى تعمل بكامل كفاءتها.")
     update.message.reply_text(welcome_message, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
 
 def handle_button_press(update, context):
@@ -289,17 +243,34 @@ def handle_button_press(update, context):
     if task: asyncio.run_coroutine_threadsafe(task, loop)
 
 async def run_whale_radar_scan_command(context, chat_id, message_id, session: aiohttp.ClientSession):
-    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"🐋 **رادار الحيتان**\n\n🔍 جارِ الفحص العميق لدفاتر الأوامر...")
-    whale_signals, error = await get_whale_signals(session)
-    if error:
-        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=error); return
-    if not whale_signals:
-        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **فحص الرادار اكتمل:** لا يوجد نشاط حيتان واضح حالياً."); return
-    message = f"🐋 **تقرير رادار الحيتان - {datetime.now().strftime('%H:%M:%S')}** 🐋\n\n"
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"🐋 **رادار الحيتان**\n\n🔍 جارِ فلترة السوق...")
+    market_data = await get_market_data(session)
+    if not market_data:
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="⚠️ تعذر جلب بيانات السوق."); return
+    potential_gems = [p for p in market_data if p.get('symbol','').endswith('USDT') and
+                       float(p.get('lastPrice','999')) <= WHALE_GEM_MAX_PRICE and
+                       WHALE_GEM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= WHALE_GEM_MAX_VOLUME_24H]
+    if not potential_gems:
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **فحص الرادار اكتمل:** لا توجد عملات تطابق المعايير."); return
+    for p in potential_gems: p['change_float'] = float(p.get('priceChangePercent', 0))
+    top_gems = sorted(potential_gems, key=lambda x: x['change_float'], reverse=True)[:WHALE_SCAN_CANDIDATE_LIMIT]
+    
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"🐋 **رادار الحيتان**\n\n🔍 جارِ فحص دفاتر أوامر {len(top_gems)} عملة...")
+    tasks = [get_order_book(session, p['symbol']) for p in top_gems]
+    all_order_books = await asyncio.gather(*tasks)
+    
     all_signals = []
-    for symbol, signals in whale_signals.items():
-        for signal in signals:
-            signal['symbol'] = symbol; all_signals.append(signal)
+    for i, book in enumerate(all_order_books):
+        symbol = top_gems[i]['symbol']
+        signals = await analyze_order_book_for_whales(book, symbol)
+        if signals:
+            for signal in signals:
+                signal['symbol'] = symbol; all_signals.append(signal)
+
+    if not all_signals:
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **فحص الرادار اكتمل:** لا يوجد نشاط حيتان واضح حالياً."); return
+
+    message = f"🐋 **تقرير رادار الحيتان - {datetime.now().strftime('%H:%M:%S')}** 🐋\n\n"
     sorted_signals = sorted(all_signals, key=lambda x: x.get('value', 0), reverse=True)
     for signal in sorted_signals:
         symbol_name = signal['symbol'].replace('USDT', '')
@@ -355,19 +326,61 @@ async def run_momentum_detector_command(context, chat_id, message_id, session: a
         add_to_monitoring(coin['symbol'], float(coin['current_price']), coin.get('peak_volume', 0), now, "الزخم اليدوي")
 
 async def run_confirmation_scan(context, chat_id, message_id, session: aiohttp.ClientSession):
-    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 1/2:** تحليل نية الحيتان...")
-    whale_signals, error1 = await get_whale_signals(session)
-    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 2/2:** تحليل الزخم الفعلي...")
-    momentum_coins, error2 = await get_momentum_signals(session)
-    if error1 or error2:
-        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=error1 or error2); return
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 1/3:** تحديد قائمة البحث الموحدة...")
+    market_data = await get_market_data(session)
+    if not market_data:
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="⚠️ تعذر جلب بيانات السوق."); return
+    
+    # --- المنطق الجديد: تحديد قائمة موحدة بناءً على أضيق المعايير ---
+    unified_max_price = min(WHALE_GEM_MAX_PRICE, MOMENTUM_MAX_PRICE) # = 0.10
+    unified_min_volume = max(WHALE_GEM_MIN_VOLUME_24H, MOMENTUM_MIN_VOLUME_24H) # = 100000
+    unified_max_volume = min(WHALE_GEM_MAX_VOLUME_24H, MOMENTUM_MAX_VOLUME_24H) # = 2000000
+
+    common_coins_data = [p for p in market_data if p.get('symbol','').endswith('USDT') and
+                       float(p.get('lastPrice','999')) <= unified_max_price and
+                       unified_min_volume <= float(p.get('quoteVolume','0')) <= unified_max_volume]
+    
+    if not common_coins_data:
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **التحليل الذكي اكتمل:** لم يتم العثور على عملات ضمن نطاق البحث الموحد."); return
+
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 2/3:** تحليل نية الحيتان لـ {len(common_coins_data)} عملة...")
+    order_book_tasks = [get_order_book(session, p['symbol']) for p in common_coins_data]
+    all_order_books = await asyncio.gather(*order_book_tasks)
+    whale_signals = {}
+    for i, book in enumerate(all_order_books):
+        symbol = common_coins_data[i]['symbol']
+        signals = await analyze_order_book_for_whales(book, symbol)
+        if signals: whale_signals[symbol] = signals
+
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 3/3:** تحليل الزخم الفعلي لـ {len(common_coins_data)} عملة...")
+    kline_tasks = [get_klines(session, p['symbol'], MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT) for p in common_coins_data]
+    all_klines_data = await asyncio.gather(*kline_tasks)
+    momentum_coins = []
+    for i, klines in enumerate(all_klines_data):
+        if not klines or len(klines) < MOMENTUM_KLINE_LIMIT: continue
+        try:
+            sp = MOMENTUM_KLINE_LIMIT // 2
+            old_v = sum(float(k[5]) for k in klines[:sp]);
+            if old_v == 0: continue
+            new_v = sum(float(k[5]) for k in klines[sp:])
+            start_p = float(klines[sp][1]);
+            if start_p == 0: continue
+            end_p = float(klines[-1][4])
+            price_change = ((end_p - start_p) / start_p) * 100
+            if new_v > old_v * MOMENTUM_VOLUME_INCREASE and price_change > MOMENTUM_PRICE_INCREASE:
+                momentum_coins.append({'symbol': common_coins_data[i]['symbol'], 'price_change': price_change})
+        except (ValueError, IndexError): continue
+    
     positive_whale_symbols = {symbol for symbol, signals in whale_signals.items() if any(s['type'] in ['Buy Wall', 'Buy Pressure'] for s in signals)}
     negative_whale_symbols = {symbol for symbol, signals in whale_signals.items() if any(s['type'] in ['Sell Wall', 'Sell Pressure'] for s in signals)}
     momentum_symbols = {coin['symbol'] for coin in momentum_coins}
+    
     confirmed_golden = positive_whale_symbols.intersection(momentum_symbols)
     confirmed_divergence = negative_whale_symbols.intersection(momentum_symbols)
+    
     if not confirmed_golden and not confirmed_divergence:
-        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **التحليل الذكي اكتمل:** لم يتم العثور على إشارات متقاطعة (توافق أو تباين) حالياً."); return
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **التحليل الذكي اكتمل:** لم يتم العثور على إشارات متقاطعة (توافق أو تباين) ضمن القائمة الموحدة."); return
+
     message = f"💡 **التحليل الذكي - {datetime.now().strftime('%H:%M:%S')}** 💡\n\n"
     if confirmed_golden:
         message += "🎯 **الفرص الذهبية (توافق إيجابي)** 🎯\n_النية والفعل متوافقان على الصعود._\n\n"
@@ -605,7 +618,7 @@ async def get_performance_report(context, chat_id, message_id, session: aiohttp.
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v14) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v15) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e: logger.error(f"Failed to send startup message: {e}")
