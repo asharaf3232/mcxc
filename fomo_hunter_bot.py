@@ -52,6 +52,7 @@ RUN_FOMO_SCAN_EVERY_MINUTES = 15
 RUN_LISTING_SCAN_EVERY_SECONDS = 60
 RUN_PERFORMANCE_TRACKER_EVERY_MINUTES = 5
 PERFORMANCE_TRACKING_DURATION_HOURS = 24
+MARKET_MOVERS_MIN_VOLUME = 50000 # حد أدنى للفوليوم لفلترة النتائج
 
 # --- إعدادات عامة ---
 HTTP_TIMEOUT = 15
@@ -128,7 +129,7 @@ class MexcClient(BaseExchangeClient):
             'symbol': item['symbol'],
             'quoteVolume': item.get('quoteVolume', '0'),
             'lastPrice': item.get('lastPrice', '0'),
-            'priceChangePercent': float(item.get('priceChangePercent', 0))
+            'priceChangePercent': float(item.get('priceChangePercent', '0')) * 100 # !إصلاح: تحويل النسبة إلى مئوية
         } for item in data if item.get('symbol','').endswith("USDT")]
 
     async def get_klines(self, symbol, interval, limit):
@@ -161,7 +162,7 @@ class GateioClient(BaseExchangeClient):
             'symbol': item['currency_pair'].replace('_', ''),
             'quoteVolume': item.get('quote_volume', '0'),
             'lastPrice': item.get('last', '0'),
-            'priceChangePercent': float(item.get('change_percentage', '0')) / 100
+            'priceChangePercent': float(item.get('change_percentage', '0')) # !إصلاح: إزالة القسمة على 100
         } for item in data if item.get('currency_pair', '').endswith("_USDT")]
 
     async def get_klines(self, symbol, interval, limit):
@@ -253,7 +254,10 @@ async def helper_get_whale_activity(client: BaseExchangeClient):
     if not market_data: return {}
     potential_gems = [p for p in market_data if float(p.get('lastPrice','999')) <= WHALE_GEM_MAX_PRICE and WHALE_GEM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= WHALE_GEM_MAX_VOLUME_24H]
     if not potential_gems: return {}
-    for p in potential_gems: p['change_float'] = float(p.get('priceChangePercent', 0))
+    
+    # نستخدم الآن النسبة المئوية الموحدة
+    for p in potential_gems: p['change_float'] = p.get('priceChangePercent', 0)
+    
     top_gems = sorted(potential_gems, key=lambda x: x['change_float'], reverse=True)[:WHALE_SCAN_CANDIDATE_LIMIT]
     tasks = [client.get_order_book(p['symbol']) for p in top_gems]
     all_order_books = await asyncio.gather(*tasks)
@@ -301,6 +305,9 @@ BTN_RECOMMENDATIONS = "💡 توصيات آلية"
 BTN_STATUS = "📊 الحالة"
 BTN_PERFORMANCE = "📈 تقرير الأداء"
 BTN_CROSS_ANALYSIS = "💪 تحليل متقاطع"
+BTN_TOP_GAINERS = "📈 الأعلى ربحاً"
+BTN_TOP_LOSERS = "📉 الأعلى خسارة"
+BTN_TOP_VOLUME = "💰 الأعلى تداولاً"
 BTN_SELECT_MEXC = "MEXC"
 BTN_SELECT_GATEIO = "Gate.io"
 BTN_SELECT_BINANCE = "Binance"
@@ -318,11 +325,12 @@ def build_menu(context: CallbackContext):
     binance_btn = f"✅ {BTN_SELECT_BINANCE}" if selected_exchange == 'binance' else BTN_SELECT_BINANCE
     toggle_tasks_btn = BTN_TASKS_ON if tasks_enabled else BTN_TASKS_OFF
 
+    # !جديد: إعادة تصميم لوحة التحكم
     keyboard = [
         [BTN_MOMENTUM, BTN_WHALE_RADAR, BTN_RECOMMENDATIONS],
+        [BTN_TOP_GAINERS, BTN_TOP_VOLUME, BTN_TOP_LOSERS],
         [BTN_CROSS_ANALYSIS, BTN_PERFORMANCE, BTN_STATUS],
-        [mexc_btn, gate_btn, binance_btn],
-        [toggle_tasks_btn]
+        [mexc_btn, gate_btn, binance_btn, toggle_tasks_btn]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -330,10 +338,11 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v14.5 - Dynamic Recs) جاهز!**\n\n"
+        "✅ **بوت التداول الذكي (v14.6 - Market Movers) جاهز!**\n\n"
         "**ما الجديد؟**\n"
-        "- **💡 توصيات ديناميكية:** أصبحت التوصيات الآن أكثر مرونة وتعتمد على أي تقاطع بين الزخم ونشاط الحيتان لزيادة الفرص.\n"
-        "- **⚠️ تنبيه فقدان الزخم:** يراقب العملات المرصودة وينبهك عند هبوطها من قمتها.\n\n"
+        "- **عودة أزرار حركة السوق:** تمت إعادة أزرار الأعلى ربحاً، خسارة، وتداولاً.\n"
+        "- **تحسين دقة البيانات** بين جميع المنصات المدعومة.\n"
+        "- **لوحة تحكم جديدة** ومنظمة بشكل أفضل.\n\n"
         "المنصة الحالية: **MEXC**")
     if update.message:
         update.message.reply_text(welcome_message, reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
@@ -386,6 +395,9 @@ def handle_button_press(update: Update, context: CallbackContext):
     elif button_text == BTN_CROSS_ANALYSIS: task = run_cross_analysis(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_PERFORMANCE: task = get_performance_report(context, chat_id, sent_message.message_id)
     elif button_text == BTN_RECOMMENDATIONS: task = run_automated_recommendations(context, chat_id, sent_message.message_id, client)
+    elif button_text == BTN_TOP_GAINERS: task = run_top_gainers(context, chat_id, sent_message.message_id, client)
+    elif button_text == BTN_TOP_LOSERS: task = run_top_losers(context, chat_id, sent_message.message_id, client)
+    elif button_text == BTN_TOP_VOLUME: task = run_top_volume(context, chat_id, sent_message.message_id, client)
 
     if task: asyncio.run_coroutine_threadsafe(task, loop)
 
@@ -500,7 +512,6 @@ async def run_automated_recommendations(context, chat_id, message_id, client: Ba
         whale_task = asyncio.create_task(helper_get_whale_activity(client))
         momentum_coins, whale_signals = await asyncio.gather(momentum_task, whale_task)
 
-        # !تعديل: نستخدم الآن أي تقاطع، تماماً مثل التحليل المتقاطع
         strong_symbols = set(momentum_coins.keys()).intersection(set(whale_signals.keys()))
         
         if not strong_symbols:
@@ -537,6 +548,74 @@ async def run_automated_recommendations(context, chat_id, message_id, client: Ba
         logger.error(f"Error in automated_recommendations on {client.name}: {e}", exc_info=True)
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ فادح أثناء توليد التوصيات.")
 
+# !جديد: وظائف أزرار حركة السوق
+async def run_top_gainers(context, chat_id, message_id, client: BaseExchangeClient):
+    initial_text = f"📈 **الأعلى ربحاً ({client.name})**\n\n🔍 جارِ جلب البيانات..."
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception: pass
+    
+    market_data = await client.get_market_data()
+    if not market_data:
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق.")
+        return
+
+    valid_data = [item for item in market_data if float(item.get('quoteVolume', '0')) > MARKET_MOVERS_MIN_VOLUME]
+    sorted_data = sorted(valid_data, key=lambda x: x.get('priceChangePercent', 0), reverse=True)[:10]
+
+    message = f"📈 **الأعلى ربحاً على {client.name}** 📈\n\n"
+    for i, coin in enumerate(sorted_data):
+        symbol = coin['symbol'].replace('USDT', '')
+        price = format_price(coin['lastPrice'])
+        change = coin.get('priceChangePercent', 0)
+        message += f"**{i+1}. ${symbol}:** `%{change:+.2f}` (السعر: ${price})\n"
+    
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+
+async def run_top_losers(context, chat_id, message_id, client: BaseExchangeClient):
+    initial_text = f"📉 **الأعلى خسارة ({client.name})**\n\n🔍 جارِ جلب البيانات..."
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception: pass
+    
+    market_data = await client.get_market_data()
+    if not market_data:
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق.")
+        return
+
+    valid_data = [item for item in market_data if float(item.get('quoteVolume', '0')) > MARKET_MOVERS_MIN_VOLUME]
+    sorted_data = sorted(valid_data, key=lambda x: x.get('priceChangePercent', 0))[:10]
+
+    message = f"📉 **الأعلى خسارة على {client.name}** 📉\n\n"
+    for i, coin in enumerate(sorted_data):
+        symbol = coin['symbol'].replace('USDT', '')
+        price = format_price(coin['lastPrice'])
+        change = coin.get('priceChangePercent', 0)
+        message += f"**{i+1}. ${symbol}:** `%{change:+.2f}` (السعر: ${price})\n"
+        
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+
+async def run_top_volume(context, chat_id, message_id, client: BaseExchangeClient):
+    initial_text = f"💰 **الأعلى تداولاً ({client.name})**\n\n🔍 جارِ جلب البيانات..."
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception: pass
+    
+    market_data = await client.get_market_data()
+    if not market_data:
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق.")
+        return
+
+    for item in market_data: item['quoteVolume_f'] = float(item.get('quoteVolume', '0'))
+    sorted_data = sorted(market_data, key=lambda x: x['quoteVolume_f'], reverse=True)[:10]
+
+    message = f"💰 **الأعلى تداولاً على {client.name}** 💰\n\n"
+    for i, coin in enumerate(sorted_data):
+        symbol = coin['symbol'].replace('USDT', '')
+        price = format_price(coin['lastPrice'])
+        volume = coin['quoteVolume_f']
+        if volume > 1_000_000: volume_str = f"{volume/1_000_000:.2f}M"
+        else: volume_str = f"{volume/1_000:.1f}K"
+        message += f"**{i+1}. ${symbol}:** (الحجم: `${volume_str}`)\n"
+        
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
 # =============================================================================
 # --- 5. المهام الآلية الدورية ---
@@ -672,7 +751,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v14.5 - Dynamic Recs) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v14.6 - Market Movers) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
