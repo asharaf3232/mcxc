@@ -5,6 +5,7 @@ import json
 import logging
 import aiohttp
 import time
+import numpy as np
 from datetime import datetime, timedelta, UTC
 from collections import deque
 from telegram import Bot, ParseMode, ReplyKeyboardMarkup, Update
@@ -38,22 +39,23 @@ MOMENTUM_VOLUME_INCREASE = 1.8
 MOMENTUM_PRICE_INCREASE = 4.0
 MOMENTUM_KLINE_INTERVAL = '5m'
 MOMENTUM_KLINE_LIMIT = 12
-MOMENTUM_LOSS_THRESHOLD_PERCENT = -5.0 # !جديد: نسبة انخفاض السعر من القمة لإرسال تنبيه
+MOMENTUM_LOSS_THRESHOLD_PERCENT = -5.0
+
+# --- إعدادات التوصيات الآلية ---
+RECOMMENDATION_KLINE_INTERVAL = '5m'
+RECOMMENDATION_KLINE_LIMIT = 20
+RECOMMENDATION_TAKE_PROFIT_PERCENT = 7.0
+RECOMMENDATION_STOP_LOSS_PERCENT = -3.5
 
 # --- إعدادات المهام الدورية ---
 RUN_FOMO_SCAN_EVERY_MINUTES = 15
-TOP_GAINERS_CANDIDATE_LIMIT = 200
 RUN_LISTING_SCAN_EVERY_SECONDS = 60
 RUN_PERFORMANCE_TRACKER_EVERY_MINUTES = 5
 PERFORMANCE_TRACKING_DURATION_HOURS = 24
-PRICE_VELOCITY_THRESHOLD = 30.0
-VOLUME_SPIKE_MULTIPLIER = 10
-MIN_USDT_VOLUME = 500000
-
 
 # --- إعدادات عامة ---
 HTTP_TIMEOUT = 15
-API_CONCURRENCY_LIMIT = 8 # قيمة آمنة لـ 3 منصات
+API_CONCURRENCY_LIMIT = 8
 
 # --- إعدادات تسجيل الأخطاء ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -70,7 +72,7 @@ PLATFORMS = ["MEXC", "Gate.io", "Binance"]
 performance_tracker = {p: {} for p in PLATFORMS}
 active_hunts = {p: {} for p in PLATFORMS}
 known_symbols = {p: set() for p in PLATFORMS}
-background_tasks = {} # لتخزين المهام الخلفية والتحكم بها
+background_tasks = {}
 recently_alerted_fomo = {p: {} for p in PLATFORMS}
 
 # =============================================================================
@@ -295,6 +297,7 @@ async def analyze_order_book_for_whales(book, symbol):
 # =============================================================================
 BTN_WHALE_RADAR = "🐋 رادار الحيتان"
 BTN_MOMENTUM = "🚀 كاشف الزخم"
+BTN_RECOMMENDATIONS = "💡 توصيات آلية"
 BTN_STATUS = "📊 الحالة"
 BTN_PERFORMANCE = "📈 تقرير الأداء"
 BTN_CROSS_ANALYSIS = "💪 تحليل متقاطع"
@@ -316,9 +319,10 @@ def build_menu(context: CallbackContext):
     toggle_tasks_btn = BTN_TASKS_ON if tasks_enabled else BTN_TASKS_OFF
 
     keyboard = [
-        [BTN_MOMENTUM, BTN_WHALE_RADAR, BTN_CROSS_ANALYSIS],
-        [BTN_PERFORMANCE, BTN_STATUS, toggle_tasks_btn],
-        [mexc_btn, gate_btn, binance_btn]
+        [BTN_MOMENTUM, BTN_WHALE_RADAR, BTN_RECOMMENDATIONS],
+        [BTN_CROSS_ANALYSIS, BTN_PERFORMANCE, BTN_STATUS],
+        [mexc_btn, gate_btn, binance_btn],
+        [toggle_tasks_btn]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -326,11 +330,11 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v14.3 - Professional) جاهز!**\n\n"
+        "✅ **بوت التداول الذكي (v14.4 - AI Recs) جاهز!**\n\n"
         "**ما الجديد؟**\n"
-        "- **تنبيه فقدان الزخم:** سيقوم البوت الآن بإرسال تنبيه عندما تفقد عملة مرصودة زخمها (تهبط من قمتها).\n"
-        "- دعم ثلاثي للمنصات (Binance, MEXC, Gate.io).\n"
-        "- تحكم كامل في المهام الخلفية.\n\n"
+        "- **💡 زر التوصيات الآلية:** يدمج الآن بيانات الزخم والحيتان لتوليد توصيات تداول متكاملة (دخول، هدف، وقف).\n"
+        "- **⚠️ تنبيه فقدان الزخم:** يراقب العملات المرصودة وينبهك عند هبوطها من قمتها.\n"
+        "- لوحة تحكم معاد تصميمها للوصول السريع.\n\n"
         "المنصة الحالية: **MEXC**")
     if update.message:
         update.message.reply_text(welcome_message, reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
@@ -382,6 +386,7 @@ def handle_button_press(update: Update, context: CallbackContext):
     elif button_text == BTN_WHALE_RADAR: task = run_whale_radar_scan(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_CROSS_ANALYSIS: task = run_cross_analysis(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_PERFORMANCE: task = get_performance_report(context, chat_id, sent_message.message_id)
+    elif button_text == BTN_RECOMMENDATIONS: task = run_automated_recommendations(context, chat_id, sent_message.message_id, client)
 
     if task: asyncio.run_coroutine_threadsafe(task, loop)
 
@@ -459,7 +464,7 @@ async def get_performance_report(context, chat_id, message_id):
         for platform_name, symbols_data in performance_tracker.items():
             for symbol, data in symbols_data.items():
                 data_copy = data.copy()
-                data_copy['exchange'] = platform_name # Ensure exchange is in the dict
+                data_copy['exchange'] = platform_name
                 all_tracked_items.append((symbol, data_copy))
         
         sorted_symbols = sorted(all_tracked_items, key=lambda item: item[1]['alert_time'], reverse=True)
@@ -486,6 +491,61 @@ async def get_performance_report(context, chat_id, message_id):
         logger.error(f"Error in get_performance_report: {e}", exc_info=True)
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ أثناء جلب تقرير الأداء.")
 
+async def run_automated_recommendations(context, chat_id, message_id, client: BaseExchangeClient):
+    initial_text = f"💡 **التوصيات الآلية ({client.name})**\n\n🔍 جارِ دمج وتحليل الإشارات..."
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception: pass
+
+    try:
+        momentum_task = asyncio.create_task(helper_get_momentum_symbols(client))
+        whale_task = asyncio.create_task(helper_get_whale_activity(client))
+        momentum_coins, whale_signals = await asyncio.gather(momentum_task, whale_task)
+
+        strong_symbols = set(momentum_coins.keys()).intersection(set(whale_signals.keys()))
+        
+        # فلترة إضافية: نريد فقط الإشارات التي فيها ضغط شراء أو حائط شراء
+        final_candidates = []
+        for symbol in strong_symbols:
+            has_positive_whale_signal = any(s['type'] in ['Buy Wall', 'Buy Pressure'] for s in whale_signals[symbol])
+            if has_positive_whale_signal:
+                final_candidates.append(symbol)
+
+        if not final_candidates:
+            context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **تحليل التوصيات على {client.name} اكتمل:**\n\nلا توجد فرص قوية تتوافق مع الشروط حالياً."); return
+        
+        message = f"💡 **أفضل التوصيات الآلية ({client.name})** 💡\n\n"
+        
+        for symbol in final_candidates:
+            klines = await client.get_klines(symbol, RECOMMENDATION_KLINE_INTERVAL, RECOMMENDATION_KLINE_LIMIT)
+            if not klines or len(klines) < 10: continue
+
+            close_prices = np.array([float(k[4]) for k in klines])
+            current_price = close_prices[-1]
+            
+            # حساب منطقة الدخول بناءً على متوسط آخر 5 إغلاقات
+            entry_zone_avg = np.mean(close_prices[-5:])
+            entry_price_low = entry_zone_avg * 0.995 # -0.5%
+            entry_price_high = entry_zone_avg * 1.005 # +0.5%
+
+            take_profit = entry_zone_avg * (1 + RECOMMENDATION_TAKE_PROFIT_PERCENT / 100)
+            stop_loss = entry_zone_avg * (1 + RECOMMENDATION_STOP_LOSS_PERCENT / 100)
+            
+            message += (
+                f"💎 **${symbol.replace('USDT','')}**\n"
+                f"   - **الدخول:** بين `{format_price(entry_price_low)}` - `{format_price(entry_price_high)}`\n"
+                f"   - **الهدف 🎯:** `{format_price(take_profit)}` (+{RECOMMENDATION_TAKE_PROFIT_PERCENT}%)\n"
+                f"   - **الوقف 🛡️:** `{format_price(stop_loss)}` ({RECOMMENDATION_STOP_LOSS_PERCENT}%)\n"
+                f"   - _السعر الحالي: {format_price(current_price)}_\n\n"
+            )
+
+        message += "--- \n**إخلاء مسؤولية:** هذه التوصيات تم توليدها آلياً بناءً على بيانات السوق الحالية وهي ليست نصيحة مالية. قم بأبحاثك الخاصة دائماً."
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error in automated_recommendations on {client.name}: {e}", exc_info=True)
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ فادح أثناء توليد التوصيات.")
+
+
 # =============================================================================
 # --- 5. المهام الآلية الدورية ---
 # =============================================================================
@@ -500,7 +560,7 @@ def add_to_monitoring(symbol, alert_price, peak_volume, alert_time, source, exch
         performance_tracker[platform_name][symbol] = {
             'alert_price': alert_price, 'alert_time': alert_time, 'source': source,
             'current_price': alert_price, 'high_price': alert_price, 'status': 'Tracking',
-            'momentum_lost_alerted': False # !جديد: لتتبع إرسال تنبيه فقدان الزخم
+            'momentum_lost_alerted': False
         }
         logger.info(f"PERFORMANCE TRACKING STARTED for {symbol} on {exchange_name}")
 
@@ -576,7 +636,6 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
         now = datetime.now(UTC)
         for platform in PLATFORMS:
             for symbol, data in list(performance_tracker[platform].items()):
-                # أرشفة وحذف البيانات القديمة
                 if now - data['alert_time'] > timedelta(hours=PERFORMANCE_TRACKING_DURATION_HOURS):
                     if performance_tracker[platform].get(symbol):
                          performance_tracker[platform][symbol]['status'] = 'Archived'
@@ -587,7 +646,6 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
                     continue
                 
                 try:
-                    # تحديث السعر الحالي وتسجيل أعلى سعر
                     client = get_exchange_client(platform, session)
                     current_price = await client.get_current_price(symbol)
                     if not current_price: continue
@@ -597,7 +655,6 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
                         if current_price > data.get('high_price', 0):
                             performance_tracker[platform][symbol]['high_price'] = current_price
                         
-                        # !جديد: التحقق من فقدان الزخم
                         high_price = performance_tracker[platform][symbol]['high_price']
                         is_momentum_source = "الزخم" in data.get('source', '') or "الفومو" in data.get('source', '')
                         already_alerted = data.get('momentum_lost_alerted', False)
@@ -623,7 +680,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v14.3 - Professional) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v14.4 - AI Recs) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
@@ -662,3 +719,4 @@ if __name__ == '__main__':
     try: asyncio.run(main())
     except KeyboardInterrupt: logger.info("Bot stopped manually.")
     except Exception as e: logger.critical(f"Bot failed to run: {e}", exc_info=True)
+
