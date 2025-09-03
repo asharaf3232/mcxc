@@ -171,7 +171,7 @@ def send_instant_alert(symbol, total_volume, trade_count):
         logger.error(f"Failed to send instant alert for {symbol}: {e}")
 
 # =============================================================================
-# 3. محركات التحليل
+# 3. محركات التحليل (للاستخدام الداخلي)
 # =============================================================================
 async def analyze_order_book_for_whales(book, symbol):
     signals = []
@@ -259,7 +259,7 @@ def build_menu():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def start_command(update, context):
-    welcome_message = ("✅ **بوت التداول الذكي (v13.2) جاهز!**\n\n"
+    welcome_message = ("✅ **بوت التداول الذكي (v13.3) جاهز!**\n\n"
                        "**ترقية الذكاء التحليلي:**\n"
                        "- زر `💡 تأكيد الإشارة` أصبح الآن يرصد **الفرص الذهبية** و**تحذيرات التباين** الخطيرة.\n\n"
                        "جميع الميزات والأزرار السابقة تعمل كما هي.")
@@ -279,6 +279,7 @@ def handle_button_press(update, context):
     elif button_text == BTN_WHALE_RADAR:
         task = run_whale_radar_scan_command(context, chat_id, sent_message.message_id, session)
     elif button_text == BTN_MOMENTUM:
+        # --- FIX: Call the original, monolithic function for maximum stability ---
         task = run_momentum_detector_command(context, chat_id, sent_message.message_id, session)
     elif button_text == BTN_PERFORMANCE:
         task = get_performance_report(context, chat_id, sent_message.message_id, session)
@@ -312,10 +313,36 @@ async def run_whale_radar_scan_command(context, chat_id, message_id, session: ai
     context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
 async def run_momentum_detector_command(context, chat_id, message_id, session: aiohttp.ClientSession):
-    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"🚀 **كاشف الزخم**\n\n🔍 جارِ تحليل الشموع...")
-    momentum_coins, error = await get_momentum_signals(session)
-    if error:
-        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=error); return
+    # This is the fully restored, working function from v12.2
+    initial_text = "🚀 **كاشف الزخم (فائق السرعة)**\n\n🔍 جارِ الفحص المتوازي للسوق..."
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception: pass
+    market_data = await get_market_data(session)
+    if not market_data:
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="⚠️ تعذر جلب بيانات السوق."); return
+    potential_coins = [p for p in market_data if p.get('symbol','').endswith('USDT') and
+                       float(p.get('lastPrice','1')) <= MOMENTUM_MAX_PRICE and
+                       MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= MOMENTUM_MAX_VOLUME_24H]
+    if not potential_coins:
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="لم يتم العثور على عملات ضمن المعايير الأولية."); return
+    tasks = [get_klines(session, p['symbol'], MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT) for p in potential_coins]
+    all_klines_data = await asyncio.gather(*tasks)
+    momentum_coins = []
+    for i, klines in enumerate(all_klines_data):
+        if not klines or len(klines) < MOMENTUM_KLINE_LIMIT: continue
+        try:
+            sp = MOMENTUM_KLINE_LIMIT // 2
+            old_v = sum(float(k[5]) for k in klines[:sp]);
+            if old_v == 0: continue
+            new_v = sum(float(k[5]) for k in klines[sp:])
+            start_p = float(klines[sp][1]);
+            if start_p == 0: continue
+            end_p = float(klines[-1][4])
+            price_change = ((end_p - start_p) / start_p) * 100
+            if new_v > old_v * MOMENTUM_VOLUME_INCREASE and price_change > MOMENTUM_PRICE_INCREASE:
+                momentum_coins.append({'symbol': potential_coins[i]['symbol'], 'price_change': price_change,
+                                       'current_price': end_p, 'peak_volume': new_v})
+        except (ValueError, IndexError): continue
     if not momentum_coins:
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **الفحص السريع اكتمل:** لا يوجد زخم حقيقي حالياً."); return
     sorted_coins = sorted(momentum_coins, key=lambda x: x['price_change'], reverse=True)
@@ -331,9 +358,6 @@ async def run_momentum_detector_command(context, chat_id, message_id, session: a
         add_to_monitoring(coin['symbol'], float(coin['current_price']), coin.get('peak_volume', 0), now, "الزخم اليدوي")
 
 async def run_confirmation_scan(context, chat_id, message_id, session: aiohttp.ClientSession):
-    """
-    *** الدالة الجديدة والمحسنة التي ترصد التوافق والتباين ***
-    """
     context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 1/2:** تحليل نية الحيتان...")
     whale_signals, error1 = await get_whale_signals(session)
     context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 2/2:** تحليل الزخم الفعلي...")
@@ -593,7 +617,7 @@ async def get_performance_report(context, chat_id, message_id, session: aiohttp.
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v13.2) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v13.3) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e: logger.error(f"Failed to send startup message: {e}")
