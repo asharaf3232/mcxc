@@ -38,6 +38,7 @@ MOMENTUM_VOLUME_INCREASE = 1.8
 MOMENTUM_PRICE_INCREASE = 4.0
 MOMENTUM_KLINE_INTERVAL = '5m'
 MOMENTUM_KLINE_LIMIT = 12
+MOMENTUM_LOSS_THRESHOLD_PERCENT = -5.0 # !جديد: نسبة انخفاض السعر من القمة لإرسال تنبيه
 
 # --- إعدادات المهام الدورية ---
 RUN_FOMO_SCAN_EVERY_MINUTES = 15
@@ -325,12 +326,11 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v14.2.1 - Professional) جاهز!**\n\n"
-        "**ترقية كبرى:**\n"
-        "- الآن يدعم البوت **Binance**, **MEXC**, و **Gate.io**.\n"
-        "- زر جديد للتحكم في تشغيل/إيقاف المهام الخلفية.\n"
-        "- لوحة تحكم ذكية تظهر اختياراتك الحالية.\n"
-        "- تم إصلاح وتفعيل مهمة 'صياد الفومو' التلقائية.\n\n"
+        "✅ **بوت التداول الذكي (v14.3 - Professional) جاهز!**\n\n"
+        "**ما الجديد؟**\n"
+        "- **تنبيه فقدان الزخم:** سيقوم البوت الآن بإرسال تنبيه عندما تفقد عملة مرصودة زخمها (تهبط من قمتها).\n"
+        "- دعم ثلاثي للمنصات (Binance, MEXC, Gate.io).\n"
+        "- تحكم كامل في المهام الخلفية.\n\n"
         "المنصة الحالية: **MEXC**")
     if update.message:
         update.message.reply_text(welcome_message, reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
@@ -499,7 +499,8 @@ def add_to_monitoring(symbol, alert_price, peak_volume, alert_time, source, exch
     if symbol not in performance_tracker[platform_name]:
         performance_tracker[platform_name][symbol] = {
             'alert_price': alert_price, 'alert_time': alert_time, 'source': source,
-            'current_price': alert_price, 'high_price': alert_price, 'status': 'Tracking'
+            'current_price': alert_price, 'high_price': alert_price, 'status': 'Tracking',
+            'momentum_lost_alerted': False # !جديد: لتتبع إرسال تنبيه فقدان الزخم
         }
         logger.info(f"PERFORMANCE TRACKING STARTED for {symbol} on {exchange_name}")
 
@@ -517,7 +518,6 @@ async def fomo_hunter_loop(client: BaseExchangeClient, bot_data):
 
             now = datetime.now(UTC)
             
-            # Filter out coins that were alerted recently
             new_alerts = []
             for symbol, data in momentum_coins_data.items():
                 last_alert_time = recently_alerted_fomo[client.name].get(symbol)
@@ -531,7 +531,7 @@ async def fomo_hunter_loop(client: BaseExchangeClient, bot_data):
 
             sorted_coins = sorted(new_alerts, key=lambda x: x['price_change'], reverse=True)
             message = f"🚨 **تنبيه تلقائي من صياد الفومو ({client.name})** 🚨\n\n"
-            for i, coin in enumerate(sorted_coins[:5]): # Limit to top 5 to avoid spam
+            for i, coin in enumerate(sorted_coins[:5]):
                 message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n   - السعر: `${format_price(coin['current_price'])}`\n   - **زخم آخر 30 دقيقة: `%{coin['price_change']:+.2f}`**\n\n")
             
             bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
@@ -575,8 +575,8 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
         await asyncio.sleep(RUN_PERFORMANCE_TRACKER_EVERY_MINUTES * 60)
         now = datetime.now(UTC)
         for platform in PLATFORMS:
-            # Create a copy of items to avoid runtime errors during iteration
             for symbol, data in list(performance_tracker[platform].items()):
+                # أرشفة وحذف البيانات القديمة
                 if now - data['alert_time'] > timedelta(hours=PERFORMANCE_TRACKING_DURATION_HOURS):
                     if performance_tracker[platform].get(symbol):
                          performance_tracker[platform][symbol]['status'] = 'Archived'
@@ -587,23 +587,43 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
                     continue
                 
                 try:
+                    # تحديث السعر الحالي وتسجيل أعلى سعر
                     client = get_exchange_client(platform, session)
                     current_price = await client.get_current_price(symbol)
-                    if current_price:
-                        if performance_tracker[platform].get(symbol):
-                           performance_tracker[platform][symbol]['current_price'] = current_price
-                           if current_price > data.get('high_price', 0):
-                               performance_tracker[platform][symbol]['high_price'] = current_price
+                    if not current_price: continue
+
+                    if performance_tracker[platform].get(symbol):
+                        performance_tracker[platform][symbol]['current_price'] = current_price
+                        if current_price > data.get('high_price', 0):
+                            performance_tracker[platform][symbol]['high_price'] = current_price
+                        
+                        # !جديد: التحقق من فقدان الزخم
+                        high_price = performance_tracker[platform][symbol]['high_price']
+                        is_momentum_source = "الزخم" in data.get('source', '') or "الفومو" in data.get('source', '')
+                        already_alerted = data.get('momentum_lost_alerted', False)
+
+                        if is_momentum_source and not already_alerted and high_price > 0:
+                            price_drop_percent = ((current_price - high_price) / high_price) * 100
+                            if price_drop_percent <= MOMENTUM_LOSS_THRESHOLD_PERCENT:
+                                message = (
+                                    f"⚠️ **تنبيه: فقدان الزخم لعملة ${symbol.replace('USDT','')}** ({platform})\n\n"
+                                    f"   - أعلى سعر: `${format_price(high_price)}`\n"
+                                    f"   - السعر الحالي: `${format_price(current_price)}`\n"
+                                    f"   - **الهبوط من القمة: `{price_drop_percent:.2f}%`**"
+                                )
+                                bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+                                performance_tracker[platform][symbol]['momentum_lost_alerted'] = True
+                                logger.info(f"MOMENTUM LOSS ALERT sent for {symbol} on {platform}")
+
                 except Exception as e:
                     logger.error(f"Error updating price for {symbol} on {platform}: {e}")
-
 
 # =============================================================================
 # --- 6. تشغيل البوت ---
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v14.2.1 - Professional) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v14.3 - Professional) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
