@@ -52,7 +52,8 @@ INSTANT_TRADE_COUNT_THRESHOLD = 20
 MEXC_API_BASE_URL = "https://api.mexc.com"
 MEXC_WS_URL = "wss://wbs.mexc.com/ws"
 COOLDOWN_PERIOD_HOURS = 2
-HTTP_TIMEOUT = 15
+HTTP_TIMEOUT = 10 # Adjusted for retry mechanism
+API_RETRY_ATTEMPTS = 3
 
 # --- إعدادات تسجيل الأخطاء ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -67,14 +68,22 @@ known_symbols, active_hunts, performance_tracker = set(), {}, {}
 activity_tracker, activity_lock = {}, asyncio.Lock()
 
 # =============================================================================
-# 1. قسم الشبكة والوظائف الأساسية
+# 1. قسم الشبكة والوظائف الأساسية (مع آلية إعادة المحاولة)
 # =============================================================================
 async def fetch_json(session: aiohttp.ClientSession, url: str, params: dict = None):
-    try:
-        async with session.get(url, params=params, timeout=HTTP_TIMEOUT, headers={'User-Agent': 'Mozilla/5.0'}) as response:
-            response.raise_for_status(); return await response.json()
-    except Exception as e:
-        logger.error(f"Error fetching {url}: {e}"); return None
+    for attempt in range(API_RETRY_ATTEMPTS):
+        try:
+            async with session.get(url, params=params, timeout=HTTP_TIMEOUT, headers={'User-Agent': 'Mozilla/5.0'}) as response:
+                response.raise_for_status()
+                return await response.json()
+        except Exception as e:
+            if attempt < API_RETRY_ATTEMPTS - 1:
+                logger.warning(f"API call to {url} failed. Attempt {attempt+1}/{API_RETRY_ATTEMPTS}. Retrying in 1s...")
+                await asyncio.sleep(1)
+            else:
+                logger.error(f"API call to {url} failed after {API_RETRY_ATTEMPTS} attempts: {e}")
+                return None
+    return None
 
 async def get_market_data(session: aiohttp.ClientSession):
     return await fetch_json(session, f"{MEXC_API_BASE_URL}/api/v3/ticker/24hr")
@@ -99,6 +108,7 @@ async def get_order_book(session: aiohttp.ClientSession, symbol: str, limit: int
 # =============================================================================
 # 2. قسم الرصد اللحظي (WebSocket)
 # =============================================================================
+# ... (This section remains unchanged)
 async def handle_websocket_message(message):
     try:
         data = json.loads(message)
@@ -166,9 +176,8 @@ def send_instant_alert(symbol, total_volume, trade_count):
         logger.info(f"INSTANT ALERT sent for {symbol}.")
     except Exception as e:
         logger.error(f"Failed to send instant alert for {symbol}: {e}")
-
 # =============================================================================
-# 3. محركات التحليل
+# 3. محركات التحليل (للاستخدام الداخلي)
 # =============================================================================
 async def analyze_order_book_for_whales(book, symbol):
     signals = []
@@ -211,9 +220,10 @@ def build_menu():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def start_command(update, context):
-    welcome_message = ("✅ **بوت التداول الذكي (v16) جاهز!**\n\n"
-                       "**ترقية المنطق التحليلي:**\n"
-                       "- `💡 المحلل الذكي` يستخدم الآن منهجية بحث موحدة لضمان دقة النتائج ورصد **الفرص الذهبية** و**تحذيرات التباين** بشكل فعال.\n\n"
+    welcome_message = ("✅ **بوت التداول الذكي (v17) جاهز!**\n\n"
+                       "**ترقية المنطق والاستقرار:**\n"
+                       "- `💡 المحلل الذكي` يستخدم الآن منهجية جديدة وموثوقة لرصد الفرص والتحذيرات.\n"
+                       "- تم تحسين استقرار البوت وتقليل أخطاء الاتصال بالمنصة.\n\n"
                        "جميع الوظائف الأخرى تعمل بكامل كفاءتها.")
     update.message.reply_text(welcome_message, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
 
@@ -281,7 +291,6 @@ async def run_whale_radar_scan_command(context, chat_id, message_id, session: ai
     context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
 async def run_momentum_detector_command(context, chat_id, message_id, session: aiohttp.ClientSession):
-    # This is the original, fully working function from v10
     initial_text = "🚀 **كاشف الزخم (فائق السرعة)**\n\n🔍 جارِ الفحص المتوازي للسوق..."
     try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
     except Exception: pass
@@ -326,34 +335,34 @@ async def run_momentum_detector_command(context, chat_id, message_id, session: a
         add_to_monitoring(coin['symbol'], float(coin['current_price']), coin.get('peak_volume', 0), now, "الزخم اليدوي")
 
 async def run_confirmation_scan(context, chat_id, message_id, session: aiohttp.ClientSession):
-    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 1/3:** تحديد قائمة البحث الموحدة...")
+    # --- المنطق الجديد والموثوق للمحلل الذكي ---
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 1/2:** جلب نتائج رادار الحيتان...")
+    
+    # أولاً: جلب نتائج الحيتان
     market_data = await get_market_data(session)
     if not market_data:
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="⚠️ تعذر جلب بيانات السوق."); return
     
-    # --- المنطق الجديد: تحديد قائمة موحدة بناءً على أضيق المعايير ---
-    unified_max_price = min(WHALE_GEM_MAX_PRICE, MOMENTUM_MAX_PRICE) # = 0.10
-    unified_min_volume = max(WHALE_GEM_MIN_VOLUME_24H, MOMENTUM_MIN_VOLUME_24H) # = 100000
-    unified_max_volume = min(WHALE_GEM_MAX_VOLUME_24H, MOMENTUM_MAX_VOLUME_24H) # = 2000000
-
-    common_coins_data = [p for p in market_data if p.get('symbol','').endswith('USDT') and
-                       float(p.get('lastPrice','999')) <= unified_max_price and
-                       unified_min_volume <= float(p.get('quoteVolume','0')) <= unified_max_volume]
+    whale_potential = [p for p in market_data if p.get('symbol','').endswith('USDT') and
+                       float(p.get('lastPrice','999')) <= WHALE_GEM_MAX_PRICE and
+                       WHALE_GEM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= WHALE_GEM_MAX_VOLUME_24H]
     
-    if not common_coins_data:
-        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **التحليل الذكي اكتمل:** لم يتم العثور على عملات ضمن نطاق البحث الموحد."); return
-
-    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 2/3:** تحليل نية الحيتان لـ {len(common_coins_data)} عملة...")
-    order_book_tasks = [get_order_book(session, p['symbol']) for p in common_coins_data]
-    all_order_books = await asyncio.gather(*order_book_tasks)
+    whale_tasks = [get_order_book(session, p['symbol']) for p in whale_potential]
+    all_order_books = await asyncio.gather(*whale_tasks)
     whale_signals = {}
     for i, book in enumerate(all_order_books):
-        symbol = common_coins_data[i]['symbol']
+        symbol = whale_potential[i]['symbol']
         signals = await analyze_order_book_for_whales(book, symbol)
         if signals: whale_signals[symbol] = signals
+        
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 2/2:** جلب نتائج كاشف الزخم...")
 
-    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 3/3:** تحليل الزخم الفعلي لـ {len(common_coins_data)} عملة...")
-    kline_tasks = [get_klines(session, p['symbol'], MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT) for p in common_coins_data]
+    # ثانياً: جلب نتائج الزخم
+    momentum_potential = [p for p in market_data if p.get('symbol','').endswith('USDT') and
+                       float(p.get('lastPrice','1')) <= MOMENTUM_MAX_PRICE and
+                       MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= MOMENTUM_MAX_VOLUME_24H]
+
+    kline_tasks = [get_klines(session, p['symbol'], MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT) for p in momentum_potential]
     all_klines_data = await asyncio.gather(*kline_tasks)
     momentum_coins = []
     for i, klines in enumerate(all_klines_data):
@@ -368,9 +377,10 @@ async def run_confirmation_scan(context, chat_id, message_id, session: aiohttp.C
             end_p = float(klines[-1][4])
             price_change = ((end_p - start_p) / start_p) * 100
             if new_v > old_v * MOMENTUM_VOLUME_INCREASE and price_change > MOMENTUM_PRICE_INCREASE:
-                momentum_coins.append({'symbol': common_coins_data[i]['symbol'], 'price_change': price_change})
+                momentum_coins.append({'symbol': momentum_potential[i]['symbol'], 'price_change': price_change})
         except (ValueError, IndexError): continue
     
+    # ثالثاً: مقارنة النتائج النهائية
     positive_whale_symbols = {symbol for symbol, signals in whale_signals.items() if any(s['type'] in ['Buy Wall', 'Buy Pressure'] for s in signals)}
     negative_whale_symbols = {symbol for symbol, signals in whale_signals.items() if any(s['type'] in ['Sell Wall', 'Sell Pressure'] for s in signals)}
     momentum_symbols = {coin['symbol'] for coin in momentum_coins}
@@ -379,7 +389,7 @@ async def run_confirmation_scan(context, chat_id, message_id, session: aiohttp.C
     confirmed_divergence = negative_whale_symbols.intersection(momentum_symbols)
     
     if not confirmed_golden and not confirmed_divergence:
-        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **التحليل الذكي اكتمل:** لم يتم العثور على إشارات متقاطعة (توافق أو تباين) ضمن القائمة الموحدة."); return
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **التحليل الذكي اكتمل:** لم يتم العثور على إشارات متقاطعة (توافق أو تباين)."); return
 
     message = f"💡 **التحليل الذكي - {datetime.now().strftime('%H:%M:%S')}** 💡\n\n"
     if confirmed_golden:
@@ -618,7 +628,7 @@ async def get_performance_report(context, chat_id, message_id, session: aiohttp.
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v15) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v16) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e: logger.error(f"Failed to send startup message: {e}")
