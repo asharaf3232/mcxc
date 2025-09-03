@@ -57,9 +57,9 @@ COOLDOWN_PERIOD_HOURS = 2
 HTTP_TIMEOUT = 15
 # *** جديد: التحكم في عدد الطلبات المتزامنة لتجنب خطأ 429 ***
 # منصة MEXC تسمح بـ 20 طلب/ثانية لهذه الأنواع من البيانات.
-# القيمة 15 هي قيمة آمنة وسريعة جداً. يمكنك زيادتها إلى 18-19 إذا أردت
+# القيمة 12 هي قيمة آمنة وسريعة. يمكنك زيادتها بحذر إلى 15.
 # ولكن لا تتجاوز 20 لتجنب الحظر المؤقت.
-API_CONCURRENCY_LIMIT = 15 # عدد الطلبات التي يمكن إرسالها في نفس الوقت
+API_CONCURRENCY_LIMIT = 12 # عدد الطلبات التي يمكن إرسالها في نفس الوقت
 
 # --- إعدادات تسجيل الأخطاء ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -375,13 +375,13 @@ async def get_top_10_list(context, chat_id, message_id, list_type, session: aioh
 
 async def run_momentum_detector(context, chat_id, message_id, session: aiohttp.ClientSession):
     initial_text = "🚀 **كاشف الزخم (فائق السرعة)**\n\n🔍 جارِ الفحص المنظم للسوق..."
-    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
     except Exception: pass
     
     momentum_coins_data = await helper_get_momentum_symbols(session)
     
     if not momentum_coins_data:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **الفحص السريع اكتمل:** لا يوجد زخم حقيقي حالياً."); return
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **الفحص السريع اكتمل:** لا يوجد زخم حقيقي حالياً."); return
         
     sorted_coins = sorted(momentum_coins_data.values(), key=lambda x: x['price_change'], reverse=True)
     
@@ -424,13 +424,13 @@ async def analyze_order_book_for_whales(book, symbol):
 
 async def run_whale_radar_scan(context, chat_id, message_id, session: aiohttp.ClientSession):
     initial_text = f"🐋 **رادار الحيتان**\n\n🔍 جارِ الفحص العميق لدفاتر الأوامر..."
-    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
     except Exception: pass
 
     whale_signals_by_symbol = await helper_get_whale_activity(session)
     
     if not whale_signals_by_symbol:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **فحص الرادار اكتمل:** لا يوجد نشاط حيتان واضح في العملات الواعدة حالياً."); return
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **فحص الرادار اكتمل:** لا يوجد نشاط حيتان واضح في العملات الواعدة حالياً."); return
 
     all_signals = [signal for signals_list in whale_signals_by_symbol.values() for signal in signals_list]
     sorted_signals = sorted(all_signals, key=lambda x: x['value'], reverse=True)
@@ -459,7 +459,7 @@ async def run_cross_analysis(context, chat_id, message_id, session: aiohttp.Clie
     initial_text = "💪 **تحليل متقاطع**\n\n" \
                    "🔍 جارِ إجراء فحص الزخم وفحص رادار الحيتان بالتوازي..."
     try:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
     except Exception:
         pass
 
@@ -478,7 +478,7 @@ async def run_cross_analysis(context, chat_id, message_id, session: aiohttp.Clie
         if not strong_symbols:
             final_message = "✅ **التحليل المتقاطع اكتمل:**\n\n" \
                             "لم يتم العثور على عملات مشتركة بين قائمة الزخم ورادار الحيتان حالياً."
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=final_message)
+            context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=final_message)
             return
 
         final_message = f"💪 **تقرير الإشارات القوية - {datetime.now().strftime('%H:%M:%S')}** 💪\n\n" \
@@ -504,11 +504,11 @@ async def run_cross_analysis(context, chat_id, message_id, session: aiohttp.Clie
                 final_message += f"   - **الحيتان:** تم رصد نشاط.\n\n"
 
         final_message += "*(هذه الإشارات تعتبر ذات جودة عالية ولكنها لا تزال تتطلب تحليلك الخاص)*"
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=final_message, parse_mode=ParseMode.MARKDOWN)
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=final_message, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
         logger.error(f"Error in cross_analysis: {e}")
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ فادح أثناء التحليل المتقاطع.")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ فادح أثناء التحليل المتقاطع.")
 
 # =============================================================================
 # 5. المهام الآلية الدورية
