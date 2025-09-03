@@ -246,7 +246,9 @@ class BybitClient(BaseExchangeClient):
             await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/kline", params=params)
             if not data or not data.get('result') or not data['result'].get('list'): return None
-            return [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['result']['list']]
+            # Bybit returns newest first, so we reverse it to get oldest first
+            klines = [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['result']['list']]
+            return klines[::-1]
 
     async def get_order_book(self, symbol, limit=20):
         async with api_semaphore:
@@ -271,29 +273,33 @@ class KucoinClient(BaseExchangeClient):
         data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/allTickers")
         if not data or not data.get('data') or not data['data'].get('ticker'): return []
         return [{
-            'symbol': item['symbol'],
+            'symbol': item['symbol'].replace('-', ''),
             'quoteVolume': item.get('volValue', '0'),
             'lastPrice': item.get('last', '0'),
             'priceChangePercent': float(item.get('changeRate', '0')) * 100
-        } for item in data['data']['ticker'] if item.get('symbol','').endswith("USDT")]
+        } for item in data['data']['ticker'] if item.get('symbol','').endswith("-USDT")]
 
     async def get_klines(self, symbol, interval, limit):
+        kucoin_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
         kucoin_interval = {'5m': '5min', '15m': '15min'}.get(interval, '5min')
         async with api_semaphore:
-            params = {'symbol': symbol, 'type': kucoin_interval}
+            params = {'symbol': kucoin_symbol, 'type': kucoin_interval}
             await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/candles", params=params)
             if not data or not data.get('data'): return None
             return [[int(k[0])*1000, k[2], k[3], k[4], k[1], k[5]] for k in data['data']]
 
     async def get_order_book(self, symbol, limit=20):
+        kucoin_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
         async with api_semaphore:
-            params = {'symbol': symbol, 'limit': limit}
+            params = {'symbol': kucoin_symbol}
             await asyncio.sleep(0.1)
+            # KuCoin's level2_20 doesn't accept a limit param, it's fixed at 20
             return await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/orderbook/level2_20", params)
 
     async def get_current_price(self, symbol: str) -> float | None:
-        data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/orderbook/level1", {'symbol': symbol})
+        kucoin_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
+        data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/orderbook/level1", {'symbol': kucoin_symbol})
         if not data or not data.get('data'): return None
         return float(data['data']['price'])
 
@@ -306,25 +312,44 @@ class OkxClient(BaseExchangeClient):
     async def get_market_data(self):
         data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/tickers", params={'instType': 'SPOT'})
         if not data or not data.get('data'): return []
-        return [{
-            'symbol': item['instId'],
-            'quoteVolume': item.get('volCcy24h', '0'),
-            'lastPrice': item.get('last', '0'),
-            'priceChangePercent': float(item.get('sodUtc8h', '0')) * 100
-        } for item in data['data'] if item.get('instId','').endswith("USDT")]
+        
+        results = []
+        for item in data['data']:
+            if item.get('instId', '').endswith("-USDT"):
+                try:
+                    last_price = float(item.get('last', '0'))
+                    open_24h = float(item.get('open24h', '0'))
+                    
+                    change_percent = ((last_price - open_24h) / open_24h) * 100 if open_24h > 0 else 0.0
+                        
+                    results.append({
+                        'symbol': item['instId'].replace('-', ''), # Standardize symbol
+                        'quoteVolume': item.get('volCcy24h', '0'),
+                        'lastPrice': item.get('last', '0'),
+                        'priceChangePercent': change_percent
+                    })
+                except (ValueError, TypeError):
+                    continue
+        return results
 
     async def get_klines(self, symbol, interval, limit):
         okx_interval = {'5m': '5m', '15m': '15m'}.get(interval, '5m')
+        # OKX requires the hyphenated format for API calls
+        okx_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
         async with api_semaphore:
-            params = {'instId': symbol, 'bar': okx_interval, 'limit': limit}
+            params = {'instId': okx_symbol, 'bar': okx_interval, 'limit': limit}
             await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/candles", params=params)
             if not data or not data.get('data'): return None
-            return [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['data']]
+            # OKX returns newest first, so we reverse it to get oldest first
+            klines = [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['data']]
+            return klines[::-1]
 
     async def get_order_book(self, symbol, limit=20):
+        # OKX requires the hyphenated format for API calls
+        okx_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
         async with api_semaphore:
-            params = {'instId': symbol, 'sz': limit}
+            params = {'instId': okx_symbol, 'sz': limit}
             await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/books", params)
             if not data or not data.get('data'): return None
@@ -332,9 +357,12 @@ class OkxClient(BaseExchangeClient):
             return {'bids': book_data.get('bids', []), 'asks': book_data.get('asks', [])}
 
     async def get_current_price(self, symbol: str) -> float | None:
-        data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/tickers", params={'instId': symbol})
+        # OKX requires the hyphenated format for API calls
+        okx_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
+        data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/tickers", params={'instId': okx_symbol})
         if not data or not data.get('data'): return None
         return float(data['data'][0]['last'])
+
 
 def get_exchange_client(exchange_name, session):
     clients = {
@@ -345,7 +373,11 @@ def get_exchange_client(exchange_name, session):
         'kucoin': KucoinClient,
         'okx': OkxClient
     }
-    return clients.get(exchange_name.lower())(session)
+    # Ensure KuCoin client is properly instantiated
+    client_class = clients.get(exchange_name.lower())
+    if client_class:
+        return client_class(session)
+    return None
 
 # =============================================================================
 # --- الوظائف المساعدة للتحليل ---
@@ -527,6 +559,10 @@ def handle_button_press(update: Update, context: CallbackContext):
         
     current_exchange = context.user_data.get('exchange', 'mexc')
     client = get_exchange_client(current_exchange, session)
+    if not client:
+        update.message.reply_text("حدث خطأ في اختيار المنصة. يرجى المحاولة مرة أخرى.")
+        return
+        
     sent_message = context.bot.send_message(chat_id=chat_id, text=f"🔍 جارِ تنفيذ طلبك على منصة {client.name}...")
     
     task = None
@@ -788,6 +824,7 @@ async def fomo_hunter_loop(client: BaseExchangeClient, bot_data):
     """
     مهمة خلفية للكشف عن عملات الزخم بشكل دوري وإرسال تنبيهات.
     """
+    if not client: return
     logger.info(f"Fomo Hunter background task started for {client.name}.")
     while True:
         await asyncio.sleep(RUN_FOMO_SCAN_EVERY_MINUTES * 60)
@@ -829,6 +866,7 @@ async def new_listings_sniper_loop(client: BaseExchangeClient, bot_data):
     """
     مهمة خلفية للكشف عن الإدراحات الجديدة بشكل دوري.
     """
+    if not client: return
     logger.info(f"New Listings Sniper background task started for {client.name}.")
     global known_symbols
     known_symbols[client.name] = set()
@@ -876,6 +914,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
                 
                 try:
                     client = get_exchange_client(platform, session)
+                    if not client: continue
                     current_price = await client.get_current_price(symbol)
                     if not current_price: continue
 
@@ -939,9 +978,10 @@ async def main():
         
         background_tasks['performance'] = asyncio.create_task(performance_tracker_loop(session))
         for platform_name in PLATFORMS:
-            client = get_exchange_client(platform_name, session)
-            background_tasks[f'fomo_{platform_name}'] = asyncio.create_task(fomo_hunter_loop(client, dp.bot_data))
-            background_tasks[f'listings_{platform_name}'] = asyncio.create_task(new_listings_sniper_loop(client, dp.bot_data))
+            client = get_exchange_client(platform_name.lower(), session)
+            if client:
+                background_tasks[f'fomo_{platform_name}'] = asyncio.create_task(fomo_hunter_loop(client, dp.bot_data))
+                background_tasks[f'listings_{platform_name}'] = asyncio.create_task(new_listings_sniper_loop(client, dp.bot_data))
         
         updater.start_polling(drop_pending_updates=True)
         logger.info("Telegram bot is now polling for commands...")
@@ -952,4 +992,3 @@ if __name__ == '__main__':
     try: asyncio.run(main())
     except KeyboardInterrupt: logger.info("Bot stopped manually.")
     except Exception as e: logger.critical(f"Bot failed to run: {e}", exc_info=True)
-
