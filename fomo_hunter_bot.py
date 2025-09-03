@@ -1,13 +1,10 @@
 # -*- coding: utf-8 -*-
 import os
 import asyncio
-import json
 import logging
 import aiohttp
-import time
 import numpy as np
 from datetime import datetime, timedelta, UTC
-from collections import deque
 from telegram import Bot, ParseMode, ReplyKeyboardMarkup, Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
@@ -19,7 +16,7 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, Callb
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# --- Exchange API Keys (للتطوير المستقبلي) ---
+# --- Exchange API Keys ---
 BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
 
@@ -52,7 +49,7 @@ RUN_FOMO_SCAN_EVERY_MINUTES = 15
 RUN_LISTING_SCAN_EVERY_SECONDS = 60
 RUN_PERFORMANCE_TRACKER_EVERY_MINUTES = 5
 PERFORMANCE_TRACKING_DURATION_HOURS = 24
-MARKET_MOVERS_MIN_VOLUME = 50000 # حد أدنى للفوليوم لفلترة النتائج
+MARKET_MOVERS_MIN_VOLUME = 50000
 
 # --- إعدادات عامة ---
 HTTP_TIMEOUT = 15
@@ -397,7 +394,6 @@ async def helper_get_momentum_symbols(client: BaseExchangeClient):
         logger.info(f"Momentum ({client.name}): Found {len(market_data)} coins, but 0 met the price/volume criteria.")
         return {}
 
-    logger.info(f"Momentum ({client.name}): Analyzing {len(potential_coins)} potential coins.")
     tasks = [client.get_klines(p['symbol'], MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT) for p in potential_coins]
     all_klines_data = await asyncio.gather(*tasks)
     
@@ -434,7 +430,6 @@ async def helper_get_whale_activity(client: BaseExchangeClient):
         logger.info(f"Whale ({client.name}): Found {len(market_data)} coins, but 0 met the price/volume criteria.")
         return {}
     
-    logger.info(f"Whale ({client.name}): Analyzing {len(potential_gems)} potential gems.")
     for p in potential_gems: p['change_float'] = p.get('priceChangePercent', 0)
     
     top_gems = sorted(potential_gems, key=lambda x: x['change_float'], reverse=True)[:WHALE_SCAN_CANDIDATE_LIMIT]
@@ -530,11 +525,10 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v15.1 - Fixed) جاهز!**\n\n"
+        "✅ **بوت التداول الذكي (v15.2 - Final Fix) جاهز!**\n\n"
         "**ما الجديد؟**\n"
-        "- **إصلاح شامل:** تم إصلاح مشكلة عدم عمل رادار الحيتان وكاشف الزخم لمنصتي **OKX** و **Bybit**.\n"
-        "- **إصلاح تقرير الأداء:** تم حل مشكلة ظهور رسالة الخطأ عند طلب تقرير الأداء.\n"
-        "- **تحسين دقة البيانات** لجميع المنصات.\n\n"
+        "- **إصلاح جذري:** تم حل مشكلة `TypeError` التي كانت تسبب خطأ في تقرير الأداء وجميع الأوامر الأخرى.\n"
+        "- **استقرار التشغيل:** تم حل مشكلة `Conflict Error` لتحسين استقرار البوت.\n\n"
         "المنصة الحالية: **MEXC**")
     if update.message:
         update.message.reply_text(welcome_message, reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
@@ -598,37 +592,37 @@ def handle_button_press(update: Update, context: CallbackContext):
 async def run_momentum_detector(context, chat_id, message_id, client: BaseExchangeClient):
     """يبدأ فحص الزخم اليدوي."""
     initial_text = f"🚀 **كاشف الزخم ({client.name})**\n\n🔍 جارِ الفحص المنظم للسوق..."
-    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
-    except Exception: pass
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception as e: logger.warning(f"Failed to edit message: {e}")
     
     momentum_coins_data = await helper_get_momentum_symbols(client)
     
     if not momentum_coins_data:
         msg = f"✅ **الفحص على {client.name} اكتمل:**\n\nلم يتم العثور على عملات تتوافق مع معايير السعر والحجم المحددة حالياً."
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=msg); return
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=msg); return
 
     sorted_coins = sorted(momentum_coins_data.values(), key=lambda x: x['price_change'], reverse=True)
     message = f"🚀 **تقرير الزخم ({client.name}) - {datetime.now().strftime('%H:%M:%S')}** 🚀\n\n"
     for i, coin in enumerate(sorted_coins[:10]):
         message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n   - السعر: `${format_price(coin['current_price'])}`\n   - **زخم آخر 30 دقيقة: `%{coin['price_change']:+.2f}`**\n\n")
     message += "*(تمت إضافة هذه العملات إلى متتبع الأداء.)*"
-    await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
     
     now = datetime.now(UTC)
     for coin in sorted_coins[:10]:
         add_to_monitoring(coin['symbol'], float(coin['current_price']), coin.get('peak_volume', 0), now, f"الزخم ({client.name})", client.name)
 
 async def run_whale_radar_scan(context, chat_id, message_id, client: BaseExchangeClient):
-    """يبدأ فحص نشاط الحيتان اليدوي."""
+    """ يبدأ فحص نشاط الحيتان اليدوي. """
     initial_text = f"🐋 **رادار الحيتان ({client.name})**\n\n🔍 جارِ الفحص العميق..."
-    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
-    except Exception: pass
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception as e: logger.warning(f"Failed to edit message: {e}")
     
     whale_signals_by_symbol = await helper_get_whale_activity(client)
     
     if not whale_signals_by_symbol:
         msg = f"✅ **فحص الرادار على {client.name} اكتمل:**\n\nلم يتم العثور على عملات تظهر نشاط حيتان واضح ضمن معايير البحث."
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=msg); return
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=msg); return
 
     all_signals = [signal for signals_list in whale_signals_by_symbol.values() for signal in signals_list]
     sorted_signals = sorted(all_signals, key=lambda x: x.get('value', 0), reverse=True)
@@ -639,13 +633,13 @@ async def run_whale_radar_scan(context, chat_id, message_id, client: BaseExchang
         elif signal['type'] == 'Sell Wall': message += (f"🔴 **حائط بيع ضخم على ${symbol_name}**\n   - **الحجم:** `${signal['value']:,.0f}` USDT\n   - **عند سعر:** `{format_price(signal['price'])}`\n\n")
         elif signal['type'] == 'Buy Pressure': message += (f"📈 **ضغط شراء عالٍ على ${symbol_name}**\n   - **النسبة:** الشراء يفوق البيع بـ `{signal['value']:.1f}x`\n\n")
         elif signal['type'] == 'Sell Pressure': message += (f"📉 **ضغط بيع عالٍ على ${symbol_name}**\n   - **النسبة:** البيع يفوق الشراء بـ `{signal['value']:.1f}x`\n\n")
-    await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
 async def run_cross_analysis(context, chat_id, message_id, client: BaseExchangeClient):
     """يجمع بين إشارات الزخم والحيتان لتقديم إشارات قوية."""
     initial_text = f"💪 **تحليل متقاطع ({client.name})**\n\n🔍 جارِ إجراء الفحصين بالتوازي..."
-    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
-    except Exception: pass
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception as e: logger.warning(f"Failed to edit message: {e}")
     try:
         momentum_task = asyncio.create_task(helper_get_momentum_symbols(client))
         whale_task = asyncio.create_task(helper_get_whale_activity(client))
@@ -654,7 +648,7 @@ async def run_cross_analysis(context, chat_id, message_id, client: BaseExchangeC
         strong_symbols = set(momentum_coins_data.keys()).intersection(set(whale_signals_by_symbol.keys()))
         
         if not strong_symbols:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **التحليل المتقاطع على {client.name} اكتمل:**\n\nلم يتم العثور على عملات مشتركة حالياً."); return
+            context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **التحليل المتقاطع على {client.name} اكتمل:**\n\nلم يتم العثور على عملات مشتركة حالياً."); return
         
         message = f"💪 **تقرير الإشارات القوية ({client.name}) - {datetime.now().strftime('%H:%M:%S')}** 💪\n\n"
         for symbol in strong_symbols:
@@ -667,23 +661,15 @@ async def run_cross_analysis(context, chat_id, message_id, client: BaseExchangeC
             if whale_info_parts: message += f"   - **الحيتان:** " + ", ".join(whale_info_parts) + ".\n\n"
             else: message += f"   - **الحيتان:** تم رصد نشاط.\n\n"
         message += "*(إشارات عالية الجودة تتطلب تحليلك الخاص)*"
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Error in cross_analysis on {client.name}: {e}", exc_info=True)
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ فادح أثناء التحليل المتقاطع.")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ فادح أثناء التحليل المتقاطع.")
 
 async def get_performance_report(context, chat_id, message_id):
     """يقدم تقريراً مفصلاً عن أداء العملات المرصودة."""
     try:
-        if not any(performance_tracker.values()):
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="ℹ️ لا توجد عملات قيد تتبع الأداء حالياً.")
-            return
-        
-        message = "📊 **تقرير أداء العملات المرصودة** 📊\n\n"
-        
         all_tracked_items = []
-        # FIX: Iterate over a copy of the items to prevent a race condition
-        # where the background task modifies the dictionary while we are reading it.
         for platform_name, symbols_data in list(performance_tracker.items()):
             for symbol, data in list(symbols_data.items()):
                 data_copy = data.copy()
@@ -691,9 +677,10 @@ async def get_performance_report(context, chat_id, message_id):
                 all_tracked_items.append((symbol, data_copy))
         
         if not all_tracked_items:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="ℹ️ لا توجد عملات قيد تتبع الأداء حالياً.")
+            context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="ℹ️ لا توجد عملات قيد تتبع الأداء حالياً.")
             return
 
+        message = "📊 **تقرير أداء العملات المرصودة** 📊\n\n"
         sorted_symbols = sorted(all_tracked_items, key=lambda item: item[1]['alert_time'], reverse=True)
         
         for symbol, data in sorted_symbols:
@@ -713,16 +700,16 @@ async def get_performance_report(context, chat_id, message_id):
                         f"   - سعر التنبيه: `${format_price(alert_price)}`\n"
                         f"   - السعر الحالي: `${format_price(current_price)}` (**{current_change:+.2f}%**)\n"
                         f"   - أعلى سعر: `${format_price(high_price)}` (**{peak_change:+.2f}%**)\n\n")
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Error in get_performance_report: {e}", exc_info=True)
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ أثناء جلب تقرير الأداء.")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ أثناء جلب تقرير الأداء.")
 
 async def run_automated_recommendations(context, chat_id, message_id, client: BaseExchangeClient):
     """يقدم توصيات تداول آلية بناءً على تحليل الزخم والحيتان."""
     initial_text = f"💡 **التوصيات الآلية ({client.name})**\n\n🔍 جارِ دمج وتحليل الإشارات..."
-    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
-    except Exception: pass
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception as e: logger.warning(f"Failed to edit message: {e}")
 
     try:
         momentum_task = asyncio.create_task(helper_get_momentum_symbols(client))
@@ -732,7 +719,7 @@ async def run_automated_recommendations(context, chat_id, message_id, client: Ba
         strong_symbols = set(momentum_coins.keys()).intersection(set(whale_signals.keys()))
         
         if not strong_symbols:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **تحليل التوصيات على {client.name} اكتمل:**\n\nلا توجد فرص قوية تتوافق مع الشروط حالياً."); return
+            context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **تحليل التوصيات على {client.name} اكتمل:**\n\nلا توجد فرص قوية تتوافق مع الشروط حالياً."); return
         
         message = f"💡 **أفضل التوصيات الآلية ({client.name})** 💡\n\n"
         
@@ -759,21 +746,21 @@ async def run_automated_recommendations(context, chat_id, message_id, client: Ba
             )
 
         message += "--- \n**إخلاء مسؤولية:** هذه التوصيات تم توليدها آلياً بناءً على بيانات السوق الحالية وهي ليست نصيحة مالية. قم بأبحاثك الخاصة دائماً."
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
         logger.error(f"Error in automated_recommendations on {client.name}: {e}", exc_info=True)
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ فادح أثناء توليد التوصيات.")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ فادح أثناء توليد التوصيات.")
 
 async def run_top_gainers(context, chat_id, message_id, client: BaseExchangeClient):
     """يعرض قائمة بأكثر 10 عملات ربحاً في آخر 24 ساعة."""
     initial_text = f"📈 **الأعلى ربحاً ({client.name})**\n\n🔍 جارِ جلب البيانات..."
-    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
-    except Exception: pass
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception as e: logger.warning(f"Failed to edit message: {e}")
     
     market_data = await client.get_market_data()
     if not market_data:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق.")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق.")
         return
 
     valid_data = [item for item in market_data if float(item.get('quoteVolume', '0')) > MARKET_MOVERS_MIN_VOLUME]
@@ -786,17 +773,17 @@ async def run_top_gainers(context, chat_id, message_id, client: BaseExchangeClie
         change = coin.get('priceChangePercent', 0)
         message += f"**{i+1}. ${symbol}:** `%{change:+.2f}` (السعر: ${price})\n"
     
-    await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
 async def run_top_losers(context, chat_id, message_id, client: BaseExchangeClient):
     """يعرض قائمة بأكثر 10 عملات خسارة في آخر 24 ساعة."""
     initial_text = f"📉 **الأعلى خسارة ({client.name})**\n\n🔍 جارِ جلب البيانات..."
-    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
-    except Exception: pass
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception as e: logger.warning(f"Failed to edit message: {e}")
     
     market_data = await client.get_market_data()
     if not market_data:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق.")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق.")
         return
 
     valid_data = [item for item in market_data if float(item.get('quoteVolume', '0')) > MARKET_MOVERS_MIN_VOLUME]
@@ -809,17 +796,17 @@ async def run_top_losers(context, chat_id, message_id, client: BaseExchangeClien
         change = coin.get('priceChangePercent', 0)
         message += f"**{i+1}. ${symbol}:** `%{change:+.2f}` (السعر: ${price})\n"
         
-    await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
 async def run_top_volume(context, chat_id, message_id, client: BaseExchangeClient):
     """يعرض قائمة بأكثر 10 عملات تداولاً في آخر 24 ساعة."""
     initial_text = f"💰 **الأعلى تداولاً ({client.name})**\n\n🔍 جارِ جلب البيانات..."
-    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
-    except Exception: pass
+    try: context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception as e: logger.warning(f"Failed to edit message: {e}")
     
     market_data = await client.get_market_data()
     if not market_data:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق.")
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق.")
         return
 
     for item in market_data: item['quoteVolume_f'] = float(item.get('quoteVolume', '0'))
@@ -834,7 +821,7 @@ async def run_top_volume(context, chat_id, message_id, client: BaseExchangeClien
         else: volume_str = f"{volume/1_000:.1f}K"
         message += f"**{i+1}. ${symbol}:** (الحجم: `${volume_str}`)\n"
         
-    await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
 # =============================================================================
 # --- 5. المهام الآلية الدورية ---
@@ -853,9 +840,7 @@ def add_to_monitoring(symbol, alert_price, peak_volume, alert_time, source, exch
         logger.info(f"PERFORMANCE TRACKING STARTED for {symbol} on {exchange_name}")
 
 async def fomo_hunter_loop(client: BaseExchangeClient, bot_data):
-    """
-    مهمة خلفية للكشف عن عملات الزخم بشكل دوري وإرسال تنبيهات.
-    """
+    """مهمة خلفية للكشف عن عملات الزخم بشكل دوري وإرسال تنبيهات."""
     logger.info(f"Fomo Hunter background task started for {client.name}.")
     while True:
         await asyncio.sleep(RUN_FOMO_SCAN_EVERY_MINUTES * 60)
@@ -885,7 +870,7 @@ async def fomo_hunter_loop(client: BaseExchangeClient, bot_data):
             for i, coin in enumerate(sorted_coins[:5]):
                 message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n   - السعر: `${format_price(coin['current_price'])}`\n   - **زخم آخر 30 دقيقة: `%{coin['price_change']:+.2f}`**\n\n")
             
-            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+            bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
             
             for coin in sorted_coins[:5]:
                 add_to_monitoring(coin['symbol'], float(coin['current_price']), coin.get('peak_volume', 0), now, f"صياد الفومو ({client.name})", client.name)
@@ -894,9 +879,7 @@ async def fomo_hunter_loop(client: BaseExchangeClient, bot_data):
             logger.error(f"Error in fomo_hunter_loop for {client.name}: {e}", exc_info=True)
         
 async def new_listings_sniper_loop(client: BaseExchangeClient, bot_data):
-    """
-    مهمة خلفية للكشف عن الإدراحات الجديدة بشكل دوري.
-    """
+    """مهمة خلفية للكشف عن الإدراحات الجديدة بشكل دوري."""
     logger.info(f"New Listings Sniper background task started for {client.name}.")
     global known_symbols
     known_symbols[client.name] = set()
@@ -920,15 +903,13 @@ async def new_listings_sniper_loop(client: BaseExchangeClient, bot_data):
                 for symbol in newly_listed:
                     logger.info(f"Sniper ({client.name}): NEW LISTING DETECTED: {symbol}")
                     message = f"🎯 **إدراج جديد على {client.name}:** `${symbol}`"
-                    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+                    bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
                 known_symbols[client.name].update(newly_listed)
         except Exception as e:
             logger.error(f"An unexpected error in new_listings_sniper_loop for {client.name}: {e}")
             
-async def performance_tracker_loop(session: aiohttp.ClientSession, bot_instance: Bot):
-    """
-    مهمة خلفية لتتبع أداء العملات المرصودة وتنبيه المستخدم عند فقدان الزخم.
-    """
+async def performance_tracker_loop(session: aiohttp.ClientSession):
+    """مهمة خلفية لتتبع أداء العملات المرصودة وتنبيه المستخدم عند فقدان الزخم."""
     logger.info("Performance Tracker background task started.")
     while True:
         await asyncio.sleep(RUN_PERFORMANCE_TRACKER_EVERY_MINUTES * 60)
@@ -975,68 +956,58 @@ async def performance_tracker_loop(session: aiohttp.ClientSession, bot_instance:
                                     f"   - السعر الحالي: `${format_price(current_price)}`\n"
                                     f"   - **الهبوط من القمة: `{price_drop_percent:.2f}%`**"
                                 )
-                                await bot_instance.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+                                bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
                                 tracker_entry['momentum_lost_alerted'] = True
                                 logger.info(f"MOMENTUM LOSS ALERT sent for {symbol} on {platform}")
-
                 except Exception as e:
                     logger.error(f"Error updating price for {symbol} on {platform}: {e}")
 
 # =============================================================================
 # --- 6. تشغيل البوت ---
 # =============================================================================
-async def send_startup_message(bot_instance: Bot):
-    """يرسل رسالة بدء التشغيل إلى الدردشة المحددة."""
-    try:
-        message = "✅ **بوت التداول الذكي (v15.1 - Fixed) متصل الآن!**\n\nأرسل /start لعرض القائمة."
-        await bot_instance.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
-        logger.info("Startup message sent successfully.")
-    except Exception as e:
-        logger.error(f"Failed to send startup message: {e}")
-
-async def main():
+def main():
     """
     وظيفة التشغيل الرئيسية التي تبدأ البوت وتطلق المهام الخلفية.
     """
     if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN or 'YOUR_TELEGRAM' in TELEGRAM_CHAT_ID:
         logger.critical("FATAL ERROR: Bot token or chat ID are not set."); return
         
-    async with aiohttp.ClientSession() as session:
-        bot_instance = Bot(token=TELEGRAM_BOT_TOKEN)
-        updater = Updater(bot=bot_instance, use_context=True)
+    updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+    
+    # Create and run the asyncio event loop
+    loop = asyncio.get_event_loop()
+    
+    # Create the aiohttp session and pass it to the dispatcher context
+    session = aiohttp.ClientSession(loop=loop)
+    dp.bot_data['loop'] = loop
+    dp.bot_data['session'] = session
+    dp.bot_data['background_tasks_enabled'] = True
+    
+    # Add handlers
+    dp.add_handler(CommandHandler("start", start_command))
+    dp.add_handler(MessageHandler(Filters.text & (~Filters.command), handle_button_press))
+    
+    # Start background tasks
+    asyncio.ensure_future(performance_tracker_loop(session), loop=loop)
+    for platform_name in PLATFORMS:
+        client = get_exchange_client(platform_name, session)
+        asyncio.ensure_future(fomo_hunter_loop(client, dp.bot_data), loop=loop)
+        asyncio.ensure_future(new_listings_sniper_loop(client, dp.bot_data), loop=loop)
         
-        try:
-            await bot_instance.get_updates(offset=-1, timeout=1, limit=1)
-            logger.info("Cleared old updates.")
-        except Exception:
-            pass
-
-        dp = updater.dispatcher
-        loop = asyncio.get_running_loop()
-        dp.bot_data['loop'] = loop
-        dp.bot_data['session'] = session
-        dp.bot_data['background_tasks_enabled'] = True
-        
-        dp.add_handler(CommandHandler("start", start_command))
-        dp.add_handler(MessageHandler(Filters.text & (~Filters.command), handle_button_press))
-        
-        background_tasks['performance'] = asyncio.create_task(performance_tracker_loop(session, bot_instance))
-        for platform_name in PLATFORMS:
-            client = get_exchange_client(platform_name, session)
-            background_tasks[f'fomo_{platform_name}'] = asyncio.create_task(fomo_hunter_loop(client, dp.bot_data))
-            background_tasks[f'listings_{platform_name}'] = asyncio.create_task(new_listings_sniper_loop(client, dp.bot_data))
-        
-        updater.start_polling(drop_pending_updates=True)
-        logger.info("Telegram bot is now polling for commands...")
-        await send_startup_message(bot_instance)
-        
-        while True:
-            await asyncio.sleep(3600)
+    # Start the Bot
+    updater.start_polling(drop_pending_updates=True)
+    logger.info("Telegram bot is now polling for commands...")
+    bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت التداول الذكي (v15.2) متصل الآن!**\n\nأرسل /start لعرض القائمة.", parse_mode=ParseMode.MARKDOWN)
+    
+    # Run the bot until you press Ctrl-C
+    updater.idle()
+    
+    # Close the session when the bot is stopped
+    loop.run_until_complete(session.close())
 
 if __name__ == '__main__':
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped manually.")
+        main()
     except Exception as e:
         logger.critical(f"Bot failed to run: {e}", exc_info=True)
