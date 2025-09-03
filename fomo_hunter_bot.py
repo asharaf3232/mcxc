@@ -241,12 +241,14 @@ class BybitClient(BaseExchangeClient):
 
     async def get_klines(self, symbol, interval, limit):
         async with api_semaphore:
+            # Bybit API uses different interval strings, map them here
             bybit_interval = {'5m': '5', '15m': '15'}.get(interval, '5')
             params = {'category': 'spot', 'symbol': symbol, 'interval': bybit_interval, 'limit': limit}
             await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/kline", params=params)
             if not data or not data.get('result') or not data['result'].get('list'): return None
-            return [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['result']['list']]
+            # Format the data to match the standard expected format
+            return [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data['result']['list']]
 
     async def get_order_book(self, symbol, limit=20):
         async with api_semaphore:
@@ -254,7 +256,9 @@ class BybitClient(BaseExchangeClient):
             await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/orderbook", params)
             if not data or not data.get('result'): return None
-            return {'bids': data['result'].get('bids', []), 'asks': data['result'].get('asks', [])}
+            # Format the data to match the standard expected format
+            return {'bids': [[float(p), float(q)] for p, q in data['result'].get('bids', [])], 
+                    'asks': [[float(p), float(q)] for p, q in data['result'].get('asks', [])]}
 
     async def get_current_price(self, symbol: str) -> float | None:
         data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/tickers", params={'category': 'spot', 'symbol': symbol})
@@ -284,10 +288,12 @@ class KucoinClient(BaseExchangeClient):
             await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/candles", params=params)
             if not data or not data.get('data'): return None
-            return [[int(k[0])*1000, k[2], k[3], k[4], k[1], k[5]] for k in data['data']]
+            # KuCoin returns data in a different order, re-arrange it
+            return [[int(k[0])*1000, float(k[2]), float(k[3]), float(k[4]), float(k[1]), float(k[5])] for k in data['data']]
 
     async def get_order_book(self, symbol, limit=20):
         async with api_semaphore:
+            # KuCoin has a specific endpoint for orderbook depth
             params = {'symbol': symbol, 'limit': limit}
             await asyncio.sleep(0.1)
             return await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/orderbook/level2_20", params)
@@ -316,20 +322,25 @@ class OkxClient(BaseExchangeClient):
     async def get_klines(self, symbol, interval, limit):
         okx_interval = {'5m': '5m', '15m': '15m'}.get(interval, '5m')
         async with api_semaphore:
+            # Increase sleep time for OKX to avoid rate limiting
+            await asyncio.sleep(0.2)
             params = {'instId': symbol, 'bar': okx_interval, 'limit': limit}
-            await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/candles", params=params)
             if not data or not data.get('data'): return None
-            return [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['data']]
+            # OKX returns data as strings, convert to floats
+            return [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data['data']]
 
     async def get_order_book(self, symbol, limit=20):
         async with api_semaphore:
+            # Increase sleep time for OKX to avoid rate limiting
+            await asyncio.sleep(0.2)
             params = {'instId': symbol, 'sz': limit}
-            await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/books", params)
             if not data or not data.get('data'): return None
             book_data = data['data'][0]
-            return {'bids': book_data.get('bids', []), 'asks': book_data.get('asks', [])}
+            # Convert string prices and quantities to floats
+            return {'bids': [[float(p), float(q)] for p, q in book_data.get('bids', [])], 
+                    'asks': [[float(p), float(q)] for p, q in book_data.get('asks', [])]}
 
     async def get_current_price(self, symbol: str) -> float | None:
         data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/tickers", params={'instId': symbol})
