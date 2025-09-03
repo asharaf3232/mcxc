@@ -171,7 +171,7 @@ def send_instant_alert(symbol, total_volume, trade_count):
         logger.error(f"Failed to send instant alert for {symbol}: {e}")
 
 # =============================================================================
-# 3. محركات التحليل (القلب الجديد للبوت)
+# 3. محركات التحليل
 # =============================================================================
 async def analyze_order_book_for_whales(book, symbol):
     signals = []
@@ -259,9 +259,9 @@ def build_menu():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def start_command(update, context):
-    welcome_message = ("✅ **بوت التداول الذكي (v13.1) جاهز!**\n\n"
-                       "**ترقية الذكاء الاصطناعي:**\n"
-                       "- **جديد:** زر `💡 تأكيد الإشارة` للبحث عن أقوى الفرص التي تجمع بين **نية الحيتان** و**بداية الزخم الفعلي**.\n\n"
+    welcome_message = ("✅ **بوت التداول الذكي (v13.2) جاهز!**\n\n"
+                       "**ترقية الذكاء التحليلي:**\n"
+                       "- زر `💡 تأكيد الإشارة` أصبح الآن يرصد **الفرص الذهبية** و**تحذيرات التباين** الخطيرة.\n\n"
                        "جميع الميزات والأزرار السابقة تعمل كما هي.")
     update.message.reply_text(welcome_message, reply_markup=build_menu(), parse_mode=ParseMode.MARKDOWN)
 
@@ -331,27 +331,54 @@ async def run_momentum_detector_command(context, chat_id, message_id, session: a
         add_to_monitoring(coin['symbol'], float(coin['current_price']), coin.get('peak_volume', 0), now, "الزخم اليدوي")
 
 async def run_confirmation_scan(context, chat_id, message_id, session: aiohttp.ClientSession):
-    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **تأكيد الإشارة**\n\n⏳ **الخطوة 1/2:** جارِ تنفيذ رادار الحيتان...")
+    """
+    *** الدالة الجديدة والمحسنة التي ترصد التوافق والتباين ***
+    """
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 1/2:** تحليل نية الحيتان...")
     whale_signals, error1 = await get_whale_signals(session)
-    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **تأكيد الإشارة**\n\n⏳ **الخطوة 2/2:** جارِ تنفيذ كاشف الزخم...")
+    context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💡 **المحلل الذكي**\n\n⏳ **الخطوة 2/2:** تحليل الزخم الفعلي...")
     momentum_coins, error2 = await get_momentum_signals(session)
     if error1 or error2:
         context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=error1 or error2); return
-    whale_symbols = {symbol for symbol, signals in whale_signals.items() if any(s['type'] in ['Buy Wall', 'Buy Pressure'] for s in signals)}
+    
+    positive_whale_symbols = {symbol for symbol, signals in whale_signals.items() if any(s['type'] in ['Buy Wall', 'Buy Pressure'] for s in signals)}
+    negative_whale_symbols = {symbol for symbol, signals in whale_signals.items() if any(s['type'] in ['Sell Wall', 'Sell Pressure'] for s in signals)}
     momentum_symbols = {coin['symbol'] for coin in momentum_coins}
-    confirmed_symbols = whale_symbols.intersection(momentum_symbols)
-    if not confirmed_symbols:
-        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **الفحص المزدوج اكتمل:** لم يتم العثور على إشارات متقاطعة قوية حالياً."); return
-    message = f"🎯 **تقرير الفرص الذهبية - {datetime.now().strftime('%H:%M:%S')}** 🎯\n\nتم رصد عملات تجمع بين نية الحيتان والزخم الفعلي:\n\n"
-    for symbol in confirmed_symbols:
-        symbol_name = symbol.replace('USDT', '')
-        message += f"🪙 **${symbol_name}**\n"
-        whale_evidence = next((s for s in whale_signals[symbol] if s['type'] in ['Buy Wall', 'Buy Pressure']), None)
-        if whale_evidence:
-            if whale_evidence['type'] == 'Buy Wall': message += f"   - `دليل الحوت:` حائط شراء `${whale_evidence['value']:,.0f}`\n"
-            else: message += f"   - `دليل الحوت:` ضغط شراء بنسبة `{whale_evidence['value']:.1f}x`\n"
-        momentum_evidence = next((c for c in momentum_coins if c['symbol'] == symbol), None)
-        if momentum_evidence: message += f"   - `دليل الزخم:` ارتفاع `%{momentum_evidence['price_change']:+.2f}`\n\n"
+    
+    confirmed_golden = positive_whale_symbols.intersection(momentum_symbols)
+    confirmed_divergence = negative_whale_symbols.intersection(momentum_symbols)
+    
+    if not confirmed_golden and not confirmed_divergence:
+        context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✅ **التحليل الذكي اكتمل:** لم يتم العثور على إشارات متقاطعة (توافق أو تباين) حالياً."); return
+
+    message = f"💡 **التحليل الذكي - {datetime.now().strftime('%H:%M:%S')}** 💡\n\n"
+    
+    if confirmed_golden:
+        message += "🎯 **الفرص الذهبية (توافق إيجابي)** 🎯\n"
+        message += "_النية والفعل متوافقان على الصعود._\n\n"
+        for symbol in confirmed_golden:
+            symbol_name = symbol.replace('USDT', '')
+            message += f"🟢 **${symbol_name}**\n"
+            whale_evidence = next((s for s in whale_signals[symbol] if s['type'] in ['Buy Wall', 'Buy Pressure']), None)
+            if whale_evidence:
+                if whale_evidence['type'] == 'Buy Wall': message += f"   - `نية الحوت:` حائط شراء `${whale_evidence['value']:,.0f}`\n"
+                else: message += f"   - `نية الحوت:` ضغط شراء `{whale_evidence['value']:.1f}x`\n"
+            momentum_evidence = next((c for c in momentum_coins if c['symbol'] == symbol), None)
+            if momentum_evidence: message += f"   - `الفعل الحالي:` زخم صعود `%{momentum_evidence['price_change']:+.2f}`\n\n"
+            
+    if confirmed_divergence:
+        message += "⚠️ **تحذيرات التباين (فخ محتمل)** ⚠️\n"
+        message += "_السعر يصعد لكن الحيتان ينوون البيع._\n\n"
+        for symbol in confirmed_divergence:
+            symbol_name = symbol.replace('USDT', '')
+            message += f"🔴 **${symbol_name}**\n"
+            whale_evidence = next((s for s in whale_signals[symbol] if s['type'] in ['Sell Wall', 'Sell Pressure']), None)
+            if whale_evidence:
+                if whale_evidence['type'] == 'Sell Wall': message += f"   - `نية الحوت:` حائط بيع `${whale_evidence['value']:,.0f}`\n"
+                else: message += f"   - `نية الحوت:` ضغط بيع `{whale_evidence['value']:.1f}x`\n"
+            momentum_evidence = next((c for c in momentum_coins if c['symbol'] == symbol), None)
+            if momentum_evidence: message += f"   - `الفعل الحالي:` زخم صعود `%{momentum_evidence['price_change']:+.2f}`\n\n"
+            
     context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
 async def get_top_10_list(context, chat_id, message_id, list_type, session: aiohttp.ClientSession):
@@ -566,7 +593,7 @@ async def get_performance_report(context, chat_id, message_id, session: aiohttp.
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v13.1) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v13.2) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e: logger.error(f"Failed to send startup message: {e}")
