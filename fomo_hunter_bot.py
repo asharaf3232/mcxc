@@ -19,7 +19,7 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, Callb
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# --- Exchange API Keys (للتطوير المستقبلي) ---
+# --- Exchange API Keys ---
 BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
 
@@ -40,6 +40,14 @@ MOMENTUM_PRICE_INCREASE = 4.0
 MOMENTUM_KLINE_INTERVAL = '5m'
 MOMENTUM_KLINE_LIMIT = 12
 MOMENTUM_LOSS_THRESHOLD_PERCENT = -5.0
+
+# --- إعدادات وحدة القناص (Sniper Module) ---
+SNIPER_RADAR_RUN_EVERY_MINUTES = 30
+SNIPER_TRIGGER_RUN_EVERY_SECONDS = 60
+SNIPER_COMPRESSION_PERIOD_HOURS = 8
+SNIPER_MAX_VOLATILITY_PERCENT = 8.0
+SNIPER_BREAKOUT_VOLUME_MULTIPLIER = 4.0
+SNIPER_MIN_USDT_VOLUME = 200000
 
 # --- إعدادات المهام الدورية ---
 RUN_FOMO_SCAN_EVERY_MINUTES = 15
@@ -77,6 +85,7 @@ active_hunts = {p: {} for p in PLATFORMS}
 known_symbols = {p: set() for p in PLATFORMS}
 background_tasks = {}
 recently_alerted_fomo = {p: {} for p in PLATFORMS}
+sniper_watchlist = {p: {} for p in PLATFORMS}
 
 # =============================================================================
 # --- قسم الشبكة والوظائف الأساسية (مشتركة) ---
@@ -538,11 +547,11 @@ async def helper_get_scalp_score(client: BaseExchangeClient, symbol: str) -> int
 BTN_TA_PRO = "🔬 محلل فني"
 BTN_SCALP_SCAN = "⚡️ تحليل سريع"
 BTN_PRO_SCAN = "🎯 فحص احترافي"
+BTN_SNIPER_LIST = "🔭 قائمة القنص"
 BTN_WHALE_RADAR = "🐋 رادار الحيتان"
 BTN_MOMENTUM = "🚀 كاشف الزخم"
 BTN_STATUS = "📊 الحالة"
 BTN_PERFORMANCE = "📈 تقرير الأداء"
-BTN_CROSS_ANALYSIS = "💪 تحليل متقاطع"
 BTN_TOP_GAINERS = "📈 الأعلى ربحاً"
 BTN_TOP_LOSERS = "📉 الأعلى خسارة"
 BTN_TOP_VOLUME = "💰 الأعلى تداولاً"
@@ -570,8 +579,8 @@ def build_menu(context: CallbackContext):
     toggle_tasks_btn = BTN_TASKS_ON if tasks_enabled else BTN_TASKS_OFF
     
     keyboard = [
-        [BTN_MOMENTUM, BTN_WHALE_RADAR, BTN_PRO_SCAN],
-        [BTN_TA_PRO, BTN_SCALP_SCAN, BTN_CROSS_ANALYSIS],
+        [BTN_PRO_SCAN, BTN_MOMENTUM, BTN_WHALE_RADAR],
+        [BTN_TA_PRO, BTN_SCALP_SCAN, BTN_SNIPER_LIST],
         [BTN_TOP_GAINERS, BTN_TOP_VOLUME, BTN_TOP_LOSERS],
         [BTN_PERFORMANCE, BTN_STATUS, toggle_tasks_btn],
         [mexc_btn, gate_btn, binance_btn],
@@ -583,12 +592,11 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v19.1 - Robust Scan) جاهز!**\n\n"
-        "**🚀 ترقية الفحص الاحترافي:**\n"
-        "- تم إصلاح الخلل المنطقي وأصبحت النتائج الآن أكثر دقة.\n"
-        "- تم تحسين التوافق مع جميع المنصات (إصلاح خطأ KuCoin).\n\n"
-        "**تحسينات أخرى:**\n"
-        "- استقرار أعلى في جميع أدوات التحليل.\n\n"
+        "✅ **بوت التداول الذكي (v20.0 - Final Review) جاهز!**\n\n"
+        "**🚀 الميزات الكاملة:**\n"
+        "- **🎯 فحص احترافي:** يفلتر السوق بحثاً عن أفضل فرص المضاربة.\n"
+        "- **🔭 وحدة القناص:** ترصد وتطلق تنبيهات الاختراق لحظة حدوثها.\n"
+        "- **🔬 محللون:** تحليل فني عميق وسريع لأي عملة.\n\n"
         "المنصة الحالية: **MEXC**")
     if update.message:
         update.message.reply_text(welcome_message, reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
@@ -610,9 +618,11 @@ def status_command(update: Update, context: CallbackContext):
     for platform in PLATFORMS:
         hunts_count = len(active_hunts.get(platform, {}))
         perf_count = len(performance_tracker.get(platform, {}))
+        sniper_count = len(sniper_watchlist.get(platform, {}))
         message += f"**منصة {platform}:**\n"
         message += f"   - 🎯 الصفقات المراقبة: {hunts_count}\n"
-        message += f"   - 📈 الأداء المتتبع: {perf_count}\n\n"
+        message += f"   - 📈 الأداء المتتبع: {perf_count}\n"
+        message += f"   - 🔭 أهداف القناص: {sniper_count}\n\n"
     update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
 def handle_text_message(update: Update, context: CallbackContext):
@@ -651,6 +661,12 @@ def handle_text_message(update: Update, context: CallbackContext):
         context.user_data['awaiting_symbol_for_scalp'] = True
         update.message.reply_text("⚡️ يرجى إرسال رمز العملة للتحليل السريع (مثال: `PEPE` أو `WIFUSDT`)", parse_mode=ParseMode.MARKDOWN)
         return
+        
+    if button_text == BTN_SNIPER_LIST:
+        loop = context.bot_data['loop']
+        task = show_sniper_watchlist(update, context)
+        asyncio.run_coroutine_threadsafe(task, loop)
+        return
 
     if button_text in [BTN_SELECT_MEXC, BTN_SELECT_GATEIO, BTN_SELECT_BINANCE, BTN_SELECT_BYBIT, BTN_SELECT_KUCOIN, BTN_SELECT_OKX]:
         set_exchange(update, context, button_text); return
@@ -673,12 +689,13 @@ def handle_text_message(update: Update, context: CallbackContext):
     task = None
     if button_text == BTN_MOMENTUM: task = run_momentum_detector(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_WHALE_RADAR: task = run_whale_radar_scan(context, chat_id, sent_message.message_id, client)
-    elif button_text == BTN_CROSS_ANALYSIS: task = run_cross_analysis(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_PRO_SCAN: task = run_pro_scan(context, chat_id, sent_message.message_id, client)
-    elif button_text == BTN_PERFORMANCE: task = get_performance_report(context, chat_id, sent_message.message_id)
+    elif button_text == BTN_PERFORMANCE: task = get_performance_report(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_TOP_GAINERS: task = run_top_gainers(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_TOP_LOSERS: task = run_top_losers(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_TOP_VOLUME: task = run_top_volume(context, chat_id, sent_message.message_id, client)
+    elif button_text == BTN_CROSS_ANALYSIS: task = run_cross_analysis(context, chat_id, sent_message.message_id, client)
+
 
     if task: asyncio.run_coroutine_threadsafe(task, loop)
 
@@ -1006,6 +1023,25 @@ async def run_top_volume(context, chat_id, message_id, client: BaseExchangeClien
         message += f"**{i+1}. ${coin['symbol'].replace('USDT','')}:** (الحجم: `${volume_str}`)\n"
     await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
+async def show_sniper_watchlist(update: Update, context: CallbackContext):
+    message = "🔭 **قائمة مراقبة القناص** 🔭\n\n"
+    any_watched = False
+    for platform, watchlist in sniper_watchlist.items():
+        if watchlist:
+            any_watched = True
+            message += f"--- **{platform}** ---\n"
+            for symbol, data in list(watchlist.items())[:5]:
+                message += (f"- `${symbol.replace('USDT','')}` (نطاق: "
+                            f"`{format_price(data['low'])}` - `{format_price(data['high'])}`)\n")
+            if len(watchlist) > 5:
+                message += f"   *... و {len(watchlist) - 5} عملات أخرى.*\n"
+            message += "\n"
+    
+    if not any_watched:
+        message += "لا توجد أهداف حالية في قائمة المراقبة. يقوم الرادار بالبحث..."
+        
+    update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
 # =============================================================================
 # --- 5. المهام الآلية الدورية ---
 # =============================================================================
@@ -1117,12 +1153,93 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
                 except Exception as e:
                     logger.error(f"Error updating price for {symbol} on {platform}: {e}")
 
+async def coiled_spring_radar_loop(client: BaseExchangeClient, bot_data):
+    if not client: return
+    logger.info(f"Sniper Radar background task started for {client.name}.")
+    while True:
+        await asyncio.sleep(SNIPER_RADAR_RUN_EVERY_MINUTES * 60)
+        if not bot_data.get('background_tasks_enabled', True): continue
+        logger.info(f"===== Sniper Radar ({client.name}): Searching for coiled springs =====")
+        
+        try:
+            market_data = await client.get_market_data()
+            if not market_data: continue
+            
+            candidates = [p for p in market_data if float(p.get('quoteVolume', '0')) > SNIPER_MIN_USDT_VOLUME]
+            
+            tasks = {p['symbol']: client.get_processed_klines(p['symbol'], '15m', int(SNIPER_COMPRESSION_PERIOD_HOURS * 4)) for p in candidates}
+            
+            for symbol, klines_task in tasks.items():
+                klines = await klines_task
+                if not klines or len(klines) < int(SNIPER_COMPRESSION_PERIOD_HOURS * 4): continue
+
+                high_prices = np.array([float(k[2]) for k in klines])
+                low_prices = np.array([float(k[3]) for k in klines])
+                volumes = np.array([float(k[5]) for k in klines])
+
+                highest_high = np.max(high_prices)
+                lowest_low = np.min(low_prices)
+                
+                if lowest_low == 0: continue
+                volatility = ((highest_high - lowest_low) / lowest_low) * 100
+                
+                if volatility <= SNIPER_MAX_VOLATILITY_PERCENT:
+                    avg_volume = np.mean(volumes)
+                    if symbol not in sniper_watchlist[client.name]:
+                        sniper_watchlist[client.name][symbol] = {
+                            'high': highest_high,
+                            'low': lowest_low,
+                            'avg_volume': avg_volume,
+                            'duration_hours': SNIPER_COMPRESSION_PERIOD_HOURS
+                        }
+                        logger.info(f"SNIPER RADAR ({client.name}): Added {symbol} to watchlist. Volatility: {volatility:.2f}%")
+        except Exception as e:
+            logger.error(f"Error in coiled_spring_radar_loop for {client.name}: {e}", exc_info=True)
+
+
+async def breakout_trigger_loop(client: BaseExchangeClient, bot_data):
+    if not client: return
+    logger.info(f"Sniper Trigger background task started for {client.name}.")
+    while True:
+        await asyncio.sleep(SNIPER_TRIGGER_RUN_EVERY_SECONDS)
+        if not bot_data.get('background_tasks_enabled', True): continue
+        
+        watchlist_copy = sniper_watchlist[client.name].copy()
+        if not watchlist_copy: continue
+
+        for symbol, data in watchlist_copy.items():
+            try:
+                klines = await client.get_processed_klines(symbol, '5m', 5)
+                if not klines or len(klines) < 2: continue
+
+                current_price = float(klines[-1][4])
+                current_volume = float(klines[-1][5])
+                
+                if current_price > data['high'] and current_volume > (data['avg_volume'] * SNIPER_BREAKOUT_VOLUME_MULTIPLIER):
+                    message = (
+                        f"🎯 **تنبيه قناص: اختراق مؤكد!** 🎯\n\n"
+                        f"**العملة:** `${symbol.replace('USDT', '')}` ({client.name})\n"
+                        f"**النمط:** اختراق نطاق تجميعي استمر لـ {data['duration_hours']} ساعات.\n"
+                        f"**سعر الاختراق:** `{format_price(current_price)}`\n\n"
+                        f"*(إشارة عالية الدقة، لحظة الانطلاق المحتملة)*"
+                    )
+                    bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+                    logger.info(f"SNIPER TRIGGER ({client.name}): Breakout detected for {symbol}!")
+                    
+                    if symbol in sniper_watchlist[client.name]:
+                        del sniper_watchlist[client.name][symbol]
+
+            except Exception as e:
+                 logger.error(f"Error in breakout_trigger_loop for {symbol} on {client.name}: {e}", exc_info=True)
+                 if symbol in sniper_watchlist[client.name]:
+                        del sniper_watchlist[client.name][symbol]
+
 # =============================================================================
 # --- 6. تشغيل البوت ---
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v19.1 - Robust Scan) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v20.0 - Final Review) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
@@ -1149,6 +1266,8 @@ async def main():
             if client:
                 background_tasks[f'fomo_{platform_name}'] = asyncio.create_task(fomo_hunter_loop(client, dp.bot_data))
                 background_tasks[f'listings_{platform_name}'] = asyncio.create_task(new_listings_sniper_loop(client, dp.bot_data))
+                background_tasks[f'sniper_radar_{platform_name}'] = asyncio.create_task(coiled_spring_radar_loop(client, dp.bot_data))
+                background_tasks[f'sniper_trigger_{platform_name}'] = asyncio.create_task(breakout_trigger_loop(client, dp.bot_data))
         
         updater.start_polling(drop_pending_updates=True)
         logger.info("Telegram bot is now polling for commands...")
