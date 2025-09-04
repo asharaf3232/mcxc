@@ -57,7 +57,7 @@ MARKET_MOVERS_MIN_VOLUME = 50000
 # --- إعدادات التحليل الفني ---
 TA_KLINE_LIMIT = 200
 TA_MIN_KLINE_COUNT = 50
-FIBONACCI_PERIOD = 90 # !جديد: تحديد فترة فيبوناتشي التكيفي
+FIBONACCI_PERIOD = 90
 
 # --- إعدادات عامة ---
 HTTP_TIMEOUT = 15
@@ -125,6 +125,14 @@ class BaseExchangeClient:
     async def get_order_book(self, symbol, limit=20): raise NotImplementedError
     async def get_current_price(self, symbol): raise NotImplementedError
 
+    async def get_processed_klines(self, symbol, interval, limit):
+        """!جديد: وظيفة موحدة لجلب وفرز البيانات التاريخية بشكل صحيح."""
+        klines = await self.get_klines(symbol, interval, limit)
+        if not klines: return None
+        # التأكد من أن البيانات مرتبة زمنياً من الأقدم للأحدث
+        klines.sort(key=lambda x: int(x[0]))
+        return klines
+
 class MexcClient(BaseExchangeClient):
     def __init__(self, session, **kwargs):
         super().__init__(session, **kwargs)
@@ -175,9 +183,7 @@ class GateioClient(BaseExchangeClient):
             await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/spot/candlesticks", params=params)
             if not data: return None
-            klines = [[int(k[0])*1000, k[5], k[3], k[4], k[2], k[1]] for k in data]
-            klines.sort(key=lambda x: x[0])
-            return klines
+            return [[int(k[0])*1000, k[5], k[3], k[4], k[2], k[1]] for k in data]
     
     async def get_order_book(self, symbol, limit=20):
         gateio_symbol = f"{symbol[:-4]}_{symbol[-4:]}"
@@ -240,9 +246,7 @@ class BybitClient(BaseExchangeClient):
             await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/kline", params=params)
             if not data or not data.get('result') or not data['result'].get('list'): return None
-            klines = [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['result']['list']]
-            klines.sort(key=lambda x: x[0])
-            return klines
+            return [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['result']['list']]
     
     async def get_order_book(self, symbol, limit=20):
         async with api_semaphore:
@@ -277,9 +281,7 @@ class KucoinClient(BaseExchangeClient):
             await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/candles", params=params)
             if not data or not data.get('data'): return None
-            klines = [[int(k[0])*1000, k[2], k[3], k[4], k[1], k[5]] for k in data['data']]
-            klines.sort(key=lambda x: x[0])
-            return klines
+            return [[int(k[0])*1000, k[2], k[3], k[4], k[1], k[5]] for k in data['data']]
     
     async def get_order_book(self, symbol, limit=20):
         kucoin_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
@@ -322,9 +324,7 @@ class OkxClient(BaseExchangeClient):
             await asyncio.sleep(0.25)
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/candles", params=params)
             if not data or not data.get('data'): return None
-            klines = [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['data']]
-            klines.sort(key=lambda x: x[0])
-            return klines
+            return [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['data']]
     
     async def get_order_book(self, symbol, limit=20):
         okx_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
@@ -373,12 +373,13 @@ def calculate_macd(prices, fast_period=12, slow_period=26, signal_period=9):
     ema_fast = calculate_ema_series(prices, fast_period)
     ema_slow = calculate_ema_series(prices, slow_period)
     
-    # Align EMA series
-    ema_fast = ema_fast[slow_period - fast_period:]
+    if not ema_fast or not ema_slow: return None, None
+    ema_fast = ema_fast[len(ema_fast) - len(ema_slow):]
     
     macd_line_series = np.array(ema_fast) - np.array(ema_slow)
     signal_line_series = calculate_ema_series(macd_line_series.tolist(), signal_period)
     
+    if not signal_line_series: return None, None
     return macd_line_series[-1], signal_line_series[-1]
 
 def calculate_rsi(prices, period=14):
@@ -431,6 +432,18 @@ def calculate_fibonacci_retracement(high_prices, low_prices, period=FIBONACCI_PE
     }
     return levels
 
+def analyze_trend(current_price, ema21, ema50, sma100):
+    if ema21 and ema50 and sma100:
+        if current_price > ema21 > ema50 > sma100:
+            return "🟢 اتجاه صاعد قوي.", 2
+        if current_price > ema50 and current_price > ema21:
+            return "🟢 اتجاه صاعد.", 1
+        if current_price < ema21 < ema50 < sma100:
+            return "🔴 اتجاه هابط قوي.", -2
+        if current_price < ema50 and current_price < ema21:
+             return "🔴 اتجاه هابط.", -1
+    return "🟡 جانبي / غير واضح.", 0
+
 # =============================================================================
 # --- الوظائف المساعدة للتحليل ---
 # =============================================================================
@@ -439,12 +452,13 @@ async def helper_get_momentum_symbols(client: BaseExchangeClient):
     if not market_data: return {}
     potential_coins = [p for p in market_data if float(p.get('lastPrice','1')) <= MOMENTUM_MAX_PRICE and MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= MOMENTUM_MAX_VOLUME_24H]
     if not potential_coins: return {}
-    tasks = [client.get_klines(p['symbol'], MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT) for p in potential_coins]
+    tasks = [client.get_processed_klines(p['symbol'], MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT) for p in potential_coins]
     all_klines_data = await asyncio.gather(*tasks)
     momentum_coins_data = {}
     for i, klines in enumerate(all_klines_data):
         if not klines or len(klines) < MOMENTUM_KLINE_LIMIT: continue
         try:
+            klines = klines[-MOMENTUM_KLINE_LIMIT:]
             sp = MOMENTUM_KLINE_LIMIT // 2
             old_v = sum(float(k[5]) for k in klines[:sp]); new_v = sum(float(k[5]) for k in klines[sp:])
             start_p = float(klines[sp][1])
@@ -549,10 +563,10 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v16.5 - Adaptive TA) جاهز!**\n\n"
+        "✅ **بوت التداول الذكي (v17.0 - Pro Analyst) جاهز!**\n\n"
         "**🚀 ترقية كبرى للمحلل الفني:**\n"
-        "- **فيبوناتشي تكيفي:** مستويات أدق بناءً على آخر موجة سعرية.\n"
-        "- **إضافة مؤشر MACD:** لمزيد من الدقة في التحليل.\n"
+        "- **تحليل الاتجاه:** إضافة تحليل للاتجاه العام لكل إطار زمني.\n"
+        "- **فيبوناتشي ذكي:** مستويات أدق بناءً على آخر موجة سعرية.\n"
         "- **إصلاحات شاملة:** حل مشكلة البيانات الناقصة بشكل نهائي.\n\n"
         "المنصة الحالية: **MEXC**")
     if update.message:
@@ -669,15 +683,15 @@ async def run_full_technical_analysis(update: Update, context: CallbackContext):
         overall_score = 0
 
         for tf_name, tf_interval in timeframes.items():
-            full_klines = await client.get_klines(symbol, tf_interval, TA_KLINE_LIMIT)
+            klines = await client.get_processed_klines(symbol, tf_interval, TA_KLINE_LIMIT)
             tf_report = f"--- **إطار {tf_name}** ---\n"
             
-            if not full_klines or len(full_klines) < TA_MIN_KLINE_COUNT:
+            if not klines or len(klines) < TA_MIN_KLINE_COUNT:
                 tf_report += "لا توجد بيانات كافية للتحليل.\n\n"
                 report_parts.append(tf_report)
                 continue
 
-            klines = full_klines[-TA_KLINE_LIMIT:]
+            klines = klines[-TA_KLINE_LIMIT:]
             close_prices = np.array([float(k[4]) for k in klines])
             high_prices = np.array([float(k[2]) for k in klines])
             low_prices = np.array([float(k[3]) for k in klines])
@@ -686,19 +700,15 @@ async def run_full_technical_analysis(update: Update, context: CallbackContext):
             weight = tf_weights[tf_name]
             
             ema21, ema50, sma100 = calculate_ema(close_prices, 21), calculate_ema(close_prices, 50), calculate_sma(close_prices, 100)
-            if ema21 and ema50 and sma100:
-                if current_price > ema21 > ema50 > sma100:
-                    report_lines.append("🟢 **المتوسطات:** إيجابية، بترتيب صاعد مثالي."); overall_score += 1 * weight
-                elif current_price < ema21 < ema50 < sma100:
-                    report_lines.append("🔴 **المتوسطات:** سلبية، بترتيب هابط واضح."); overall_score -= 1 * weight
-                else: report_lines.append("🟡 **المتوسطات:** متضاربة.")
-            
+            trend_text, trend_score = analyze_trend(current_price, ema21, ema50, sma100)
+            report_lines.append(f"**الاتجاه:** {trend_text}"); overall_score += trend_score * weight
+
             macd_line, signal_line = calculate_macd(close_prices)
-            if macd_line is not None:
+            if macd_line is not None and signal_line is not None:
                 if macd_line > signal_line:
-                    report_lines.append(f"🟢 **MACD:** إيجابي (خط الماكد فوق خط الإشارة)."); overall_score += 1 * weight
+                    report_lines.append(f"🟢 **MACD:** إيجابي."); overall_score += 1 * weight
                 else:
-                    report_lines.append(f"🔴 **MACD:** سلبي (خط الماكد تحت خط الإشارة)."); overall_score -= 1 * weight
+                    report_lines.append(f"🔴 **MACD:** سلبي."); overall_score -= 1 * weight
 
             rsi = calculate_rsi(close_prices)
             if rsi:
@@ -727,9 +737,9 @@ async def run_full_technical_analysis(update: Update, context: CallbackContext):
             report_parts.append(tf_report)
 
         summary_report = "--- **ملخص التحليل الذكي** ---\n"
-        if overall_score > 3: summary_report += f"🟢 **التحليل العام يميل للإيجابية بقوة (النقاط: {overall_score}).**"
+        if overall_score >= 5: summary_report += f"🟢 **التحليل العام يميل للإيجابية بقوة (النقاط: {overall_score}).**"
         elif overall_score > 0: summary_report += f"🟢 **التحليل العام يميل للإيجابية (النقاط: {overall_score}).**"
-        elif overall_score < -3: summary_report += f"🔴 **التحليل العام يميل للسلبية بقوة (النقاط: {overall_score}).**"
+        elif overall_score <= -5: summary_report += f"🔴 **التحليل العام يميل للسلبية بقوة (النقاط: {overall_score}).**"
         elif overall_score < 0: summary_report += f"🔴 **التحليل العام يميل للسلبية (النقاط: {overall_score}).**"
         else: summary_report += f"🟡 **السوق في حيرة، الإشارات متضاربة (النقاط: {overall_score}).**"
         report_parts.append(summary_report)
@@ -991,7 +1001,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v16.5 - Adaptive TA) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v17.0 - Pro Analyst) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
