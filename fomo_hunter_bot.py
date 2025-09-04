@@ -57,6 +57,7 @@ MARKET_MOVERS_MIN_VOLUME = 50000
 # --- إعدادات التحليل الفني ---
 TA_KLINE_LIMIT = 200
 TA_MIN_KLINE_COUNT = 50
+FIBONACCI_PERIOD = 90 # !جديد: تحديد فترة فيبوناتشي التكيفي
 
 # --- إعدادات عامة ---
 HTTP_TIMEOUT = 15
@@ -105,7 +106,11 @@ async def fetch_json(session: aiohttp.ClientSession, url: str, params: dict = No
     return None
 
 def format_price(price_str):
-    try: return f"{float(price_str):.8g}"
+    try: 
+        price = float(price_str)
+        if price < 1e-4:
+            return f"{price:.10f}".rstrip('0')
+        return f"{price:.8g}"
     except (ValueError, TypeError): return price_str
 
 # =============================================================================
@@ -170,7 +175,9 @@ class GateioClient(BaseExchangeClient):
             await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/spot/candlesticks", params=params)
             if not data: return None
-            return [[int(k[0])*1000, k[5], k[3], k[4], k[2], k[1]] for k in data]
+            klines = [[int(k[0])*1000, k[5], k[3], k[4], k[2], k[1]] for k in data]
+            klines.sort(key=lambda x: x[0])
+            return klines
     
     async def get_order_book(self, symbol, limit=20):
         gateio_symbol = f"{symbol[:-4]}_{symbol[-4:]}"
@@ -234,7 +241,8 @@ class BybitClient(BaseExchangeClient):
             data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/kline", params=params)
             if not data or not data.get('result') or not data['result'].get('list'): return None
             klines = [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['result']['list']]
-            return klines[::-1]
+            klines.sort(key=lambda x: x[0])
+            return klines
     
     async def get_order_book(self, symbol, limit=20):
         async with api_semaphore:
@@ -271,7 +279,7 @@ class KucoinClient(BaseExchangeClient):
             if not data or not data.get('data'): return None
             klines = [[int(k[0])*1000, k[2], k[3], k[4], k[1], k[5]] for k in data['data']]
             klines.sort(key=lambda x: x[0])
-            return klines[-limit:] # !إصلاح: التأكد من اقتصار البيانات على الحد المطلوب
+            return klines
     
     async def get_order_book(self, symbol, limit=20):
         kucoin_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
@@ -315,7 +323,8 @@ class OkxClient(BaseExchangeClient):
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/candles", params=params)
             if not data or not data.get('data'): return None
             klines = [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['data']]
-            return klines[::-1]
+            klines.sort(key=lambda x: x[0])
+            return klines
     
     async def get_order_book(self, symbol, limit=20):
         okx_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
@@ -341,18 +350,36 @@ def get_exchange_client(exchange_name, session):
 # =============================================================================
 # --- 🔬 قسم التحليل الفني (TA Section) 🔬 ---
 # =============================================================================
+def calculate_ema_series(prices, period):
+    if len(prices) < period: return []
+    ema = []
+    sma = sum(prices[:period]) / period
+    ema.append(sma)
+    multiplier = 2 / (period + 1)
+    for price in prices[period:]:
+        ema.append((price - ema[-1]) * multiplier + ema[-1])
+    return ema
+
 def calculate_ema(prices, period):
     if len(prices) < period: return None
-    prices_series = np.asarray(prices)
-    weights = np.exp(np.linspace(-1., 0., period))
-    weights /= weights.sum()
-    a = np.convolve(prices_series, weights, mode='full')[:len(prices_series)]
-    a[:period] = a[period]
-    return a[-1]
+    return calculate_ema_series(prices, period)[-1]
 
 def calculate_sma(prices, period):
     if len(prices) < period: return None
     return np.mean(prices[-period:])
+    
+def calculate_macd(prices, fast_period=12, slow_period=26, signal_period=9):
+    if len(prices) < slow_period: return None, None
+    ema_fast = calculate_ema_series(prices, fast_period)
+    ema_slow = calculate_ema_series(prices, slow_period)
+    
+    # Align EMA series
+    ema_fast = ema_fast[slow_period - fast_period:]
+    
+    macd_line_series = np.array(ema_fast) - np.array(ema_slow)
+    signal_line_series = calculate_ema_series(macd_line_series.tolist(), signal_period)
+    
+    return macd_line_series[-1], signal_line_series[-1]
 
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1: return None
@@ -384,13 +411,20 @@ def find_support_resistance(high_prices, low_prices, window=10):
             supports.append(low_prices[i])
     return sorted(list(set(supports)), reverse=True), sorted(list(set(resistances)), reverse=True)
 
-def calculate_fibonacci_retracement(high_prices, low_prices):
-    max_price = np.max(high_prices)
-    min_price = np.min(low_prices)
+def calculate_fibonacci_retracement(high_prices, low_prices, period=FIBONACCI_PERIOD):
+    if len(high_prices) < period:
+        recent_highs = high_prices
+        recent_lows = low_prices
+    else:
+        recent_highs = high_prices[-period:]
+        recent_lows = low_prices[-period:]
+        
+    max_price = np.max(recent_highs)
+    min_price = np.min(recent_lows)
     difference = max_price - min_price
+    if difference == 0: return {}
     
     levels = {
-        'level_0.236': max_price - (difference * 0.236),
         'level_0.382': max_price - (difference * 0.382),
         'level_0.5': max_price - (difference * 0.5),
         'level_0.618': max_price - (difference * 0.618),
@@ -515,11 +549,11 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v16.4 - Bug Fixes) جاهز!**\n\n"
+        "✅ **بوت التداول الذكي (v16.5 - Adaptive TA) جاهز!**\n\n"
         "**🚀 ترقية كبرى للمحلل الفني:**\n"
-        "- **ملخص ذكي:** يعطي وزناً أكبر للإطارات الزمنية الأعلى.\n"
-        "- **فيبوناتشي:** إضافة مستويات فيبوناتشي للتحليل.\n"
-        "- **إصلاحات:** حل مشكلة البيانات الناقصة وتقارير الرسائل الطويلة.\n\n"
+        "- **فيبوناتشي تكيفي:** مستويات أدق بناءً على آخر موجة سعرية.\n"
+        "- **إضافة مؤشر MACD:** لمزيد من الدقة في التحليل.\n"
+        "- **إصلاحات شاملة:** حل مشكلة البيانات الناقصة بشكل نهائي.\n\n"
         "المنصة الحالية: **MEXC**")
     if update.message:
         update.message.reply_text(welcome_message, reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
@@ -600,25 +634,19 @@ def handle_text_message(update: Update, context: CallbackContext):
     if task: asyncio.run_coroutine_threadsafe(task, loop)
 
 async def send_long_message(context, chat_id, text, **kwargs):
-    """!جديد: وظيفة لإرسال الرسائل الطويلة عبر تقسيمها تلقائياً."""
     if len(text) <= TELEGRAM_MESSAGE_LIMIT:
         await asyncio.to_thread(context.bot.send_message, chat_id=chat_id, text=text, **kwargs)
         return
 
     parts = []
-    while len(text) > 0:
-        if len(text) > TELEGRAM_MESSAGE_LIMIT:
-            part = text[:TELEGRAM_MESSAGE_LIMIT]
-            first_ln = part.rfind('\n')
-            if first_ln != -1:
-                parts.append(part[:first_ln])
-                text = text[first_ln + 1:]
-            else:
-                parts.append(part)
-                text = text[TELEGRAM_MESSAGE_LIMIT:]
-        else:
-            parts.append(text)
-            break
+    current_part = ""
+    for line in text.split('\n'):
+        if len(current_part) + len(line) + 1 > TELEGRAM_MESSAGE_LIMIT:
+            parts.append(current_part)
+            current_part = ""
+        current_part += line + '\n'
+    if current_part:
+        parts.append(current_part)
     
     for part in parts:
         await asyncio.to_thread(context.bot.send_message, chat_id=chat_id, text=part, **kwargs)
@@ -664,6 +692,13 @@ async def run_full_technical_analysis(update: Update, context: CallbackContext):
                 elif current_price < ema21 < ema50 < sma100:
                     report_lines.append("🔴 **المتوسطات:** سلبية، بترتيب هابط واضح."); overall_score -= 1 * weight
                 else: report_lines.append("🟡 **المتوسطات:** متضاربة.")
+            
+            macd_line, signal_line = calculate_macd(close_prices)
+            if macd_line is not None:
+                if macd_line > signal_line:
+                    report_lines.append(f"🟢 **MACD:** إيجابي (خط الماكد فوق خط الإشارة)."); overall_score += 1 * weight
+                else:
+                    report_lines.append(f"🔴 **MACD:** سلبي (خط الماكد تحت خط الإشارة)."); overall_score -= 1 * weight
 
             rsi = calculate_rsi(close_prices)
             if rsi:
@@ -685,7 +720,8 @@ async def run_full_technical_analysis(update: Update, context: CallbackContext):
             else: report_lines.append("💰 **أقرب دعم:** لا يوجد دعم واضح أدناه.")
 
             fib_levels = calculate_fibonacci_retracement(high_prices, low_prices)
-            report_lines.append(f"🎚️ **فيبوناتشي:** 0.5: `{format_price(fib_levels['level_0.5'])}` | 0.618: `{format_price(fib_levels['level_0.618'])}`")
+            if fib_levels:
+                report_lines.append(f"🎚️ **فيبوناتشي:** 0.5: `{format_price(fib_levels['level_0.5'])}` | 0.618: `{format_price(fib_levels['level_0.618'])}`")
 
             tf_report += "\n".join(report_lines) + f"\n*السعر الحالي: {format_price(current_price)}*\n\n"
             report_parts.append(tf_report)
@@ -955,7 +991,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v16.4 - Bug Fixes) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v16.5 - Adaptive TA) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
