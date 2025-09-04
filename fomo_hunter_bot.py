@@ -56,10 +56,12 @@ MARKET_MOVERS_MIN_VOLUME = 50000
 
 # --- إعدادات التحليل الفني ---
 TA_KLINE_LIMIT = 200
+TA_MIN_KLINE_COUNT = 50 # !جديد: تخفيض الحد الأدنى للشموع المطلوبة للتحليل
 
 # --- إعدادات عامة ---
 HTTP_TIMEOUT = 15
 API_CONCURRENCY_LIMIT = 8
+TELEGRAM_MESSAGE_LIMIT = 4096
 
 # --- إعدادات تسجيل الأخطاء ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -264,7 +266,6 @@ class KucoinClient(BaseExchangeClient):
         api_interval = self.interval_map.get(interval, '5min')
         async with api_semaphore:
             params = {'symbol': kucoin_symbol, 'type': api_interval}
-            # KuCoin API fetches from the present into the past, so no slicing needed, but limit is not supported directly
             await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/candles", params=params)
             if not data or not data.get('data'): return None
@@ -358,21 +359,10 @@ def calculate_rsi(prices, period=14):
     losses = -deltas[deltas < 0]
     if len(gains) == 0: avg_gain = 0
     else: avg_gain = np.mean(gains)
-    if len(losses) == 0: avg_loss = 1e-10 # Avoid division by zero
+    if len(losses) == 0: avg_loss = 1e-10
     else: avg_loss = np.mean(losses)
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
-
-def calculate_macd(prices, fast_period=12, slow_period=26, signal_period=9):
-    if len(prices) < slow_period: return None, None
-    # This is a simplified MACD, a proper one needs series calculation
-    ema_fast = calculate_ema(prices, fast_period)
-    ema_slow = calculate_ema(prices, slow_period)
-    if ema_fast is None or ema_slow is None: return None, None
-    macd_line = ema_fast - ema_slow
-    # This signal line is highly simplified and not standard
-    signal_line = ema_fast - (macd_line / 2) 
-    return macd_line, signal_line
 
 def calculate_bollinger_bands(prices, period=20, num_std_dev=2):
     if len(prices) < period: return None, None, None
@@ -510,12 +500,12 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v16.1 - Interactive TA) جاهز!**\n\n"
+        "✅ **بوت التداول الذكي (v16.2 - Robust TA) جاهز!**\n\n"
         "**🔥 ميزة احترافية جديدة:**\n"
         "للحصول على تحليل فني مفصل، اضغط على زر **🔬 محلل فني** وأرسل رمز العملة.\n\n"
         "**تحسينات أخرى:**\n"
-        "- دعم كامل لـ 6 منصات كبرى.\n"
-        "- زيادة استقرار البوت وإصلاح الأخطاء.\n\n"
+        "- إصلاح مشكلة انقطاع التقارير الطويلة.\n"
+        "- تحليل العملات الجديدة ببيانات أقل.\n\n"
         "المنصة الحالية: **MEXC**")
     if update.message:
         update.message.reply_text(welcome_message, reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
@@ -542,12 +532,13 @@ def status_command(update: Update, context: CallbackContext):
         message += f"   - 📈 الأداء المتتبع: {perf_count}\n\n"
     update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
-def handle_button_press(update: Update, context: CallbackContext):
+def handle_text_message(update: Update, context: CallbackContext):
     if not update.message or not update.message.text: return
     
-    # !جديد: التحقق إذا كان البوت ينتظر رمزاً للتحليل الفني
+    text = update.message.text.strip()
+
     if context.user_data.get('awaiting_symbol_for_ta'):
-        symbol = update.message.text.strip().upper()
+        symbol = text.upper()
         if not symbol.endswith("USDT"): symbol += "USDT"
         
         context.user_data['awaiting_symbol_for_ta'] = False
@@ -558,15 +549,13 @@ def handle_button_press(update: Update, context: CallbackContext):
         asyncio.run_coroutine_threadsafe(task, loop)
         return
 
-    button_text = update.message.text.strip().replace("✅ ", "")
+    button_text = text.replace("✅ ", "")
     
-    # !جديد: التعامل مع زر المحلل الفني بشكل خاص
     if button_text == BTN_TA_PRO:
         context.user_data['awaiting_symbol_for_ta'] = True
-        update.message.reply_text("🔬 يرجى إرسال رمز العملة التي تريد تحليلها (مثال: BTC أو SOL)")
+        update.message.reply_text("🔬 يرجى إرسال رمز العملة التي تريد تحليلها (مثال: `BTC` أو `SOLUSDT`)", parse_mode=ParseMode.MARKDOWN)
         return
 
-    # باقي الأزرار
     if button_text in [BTN_SELECT_MEXC, BTN_SELECT_GATEIO, BTN_SELECT_BINANCE, BTN_SELECT_BYBIT, BTN_SELECT_KUCOIN, BTN_SELECT_OKX]:
         set_exchange(update, context, button_text); return
     if button_text in [BTN_TASKS_ON, BTN_TASKS_OFF]:
@@ -607,14 +596,17 @@ async def run_full_technical_analysis(update: Update, context: CallbackContext):
     
     try:
         timeframes = {'يومي': '1d', '4 ساعات': '4h', 'ساعة': '1h'}
-        full_report = f"📊 **التحليل الفني المفصل لـ ${symbol}** ({client.name})\n"
-        full_report += f"_{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_\n\n"
+        report_parts = []
+        header = f"📊 **التحليل الفني المفصل لـ ${symbol}** ({client.name})\n_{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_\n\n"
         overall_signals = {'bullish': 0, 'bearish': 0, 'neutral': 0}
 
         for tf_name, tf_interval in timeframes.items():
             klines = await client.get_klines(symbol, tf_interval, TA_KLINE_LIMIT)
-            if not klines or len(klines) < 100:
-                full_report += f"--- **إطار {tf_name}** ---\nلا توجد بيانات كافية.\n\n"
+            tf_report = f"--- **إطار {tf_name}** ---\n"
+            
+            if not klines or len(klines) < TA_MIN_KLINE_COUNT:
+                tf_report += "لا توجد بيانات كافية للتحليل.\n\n"
+                report_parts.append(tf_report)
                 continue
 
             close_prices = np.array([float(k[4]) for k in klines])
@@ -623,54 +615,55 @@ async def run_full_technical_analysis(update: Update, context: CallbackContext):
             current_price = close_prices[-1]
             report_lines = []
             
-            # 1. Moving Averages
             ema21, ema50, sma100 = calculate_ema(close_prices, 21), calculate_ema(close_prices, 50), calculate_sma(close_prices, 100)
             if ema21 and ema50 and sma100:
                 if current_price > ema21 > ema50 > sma100:
                     report_lines.append("🟢 **المتوسطات:** إيجابية، السعر فوق جميع المتوسطات بترتيب مثالي."); overall_signals['bullish'] += 1
                 elif current_price < ema21 < ema50 < sma100:
                     report_lines.append("🔴 **المتوسطات:** سلبية، السعر تحت جميع المتوسطات بترتيب هابط."); overall_signals['bearish'] += 1
-                else:
-                    report_lines.append("🟡 **المتوسطات:** متضاربة."); overall_signals['neutral'] += 1
+                else: report_lines.append("🟡 **المتوسطات:** متضاربة."); overall_signals['neutral'] += 1
 
-            # 2. RSI
             rsi = calculate_rsi(close_prices)
             if rsi:
                 if rsi > 70: report_lines.append(f"🔴 **RSI ({rsi:.1f}):** تشبع شرائي."); overall_signals['bearish'] += 1
                 elif rsi < 30: report_lines.append(f"🟢 **RSI ({rsi:.1f}):** تشبع بيعي."); overall_signals['bullish'] += 1
                 else: report_lines.append(f"🟡 **RSI ({rsi:.1f}):** محايد."); overall_signals['neutral'] += 1
 
-            # 3. Bollinger Bands
             upper, middle, lower = calculate_bollinger_bands(close_prices)
             if upper:
-                if current_price > upper: report_lines.append("🔴 **Bollinger:** السعر اخترق الحد العلوي (قد يرتد)."); overall_signals['bearish'] += 1
-                elif current_price < lower: report_lines.append("🟢 **Bollinger:** السعر اخترق الحد السفلي (قد يرتد)."); overall_signals['bullish'] += 1
+                if current_price > upper: report_lines.append("🔴 **Bollinger:** السعر اخترق الحد العلوي."); overall_signals['bearish'] += 1
+                elif current_price < lower: report_lines.append("🟢 **Bollinger:** السعر اخترق الحد السفلي."); overall_signals['bullish'] += 1
                 else: report_lines.append("🟡 **Bollinger:** السعر داخل النطاق."); overall_signals['neutral'] += 1
             
-            # 4. Support & Resistance
             supports, resistances = find_support_resistance(high_prices, low_prices)
-            if resistances:
-                next_res = min([r for r in resistances if r > current_price], default=None)
-                if next_res: report_lines.append(f"🛡️ **أقرب مقاومة:** {format_price(next_res)}")
-            if supports:
-                next_sup = max([s for s in supports if s < current_price], default=None)
-                if next_sup: report_lines.append(f"💰 **أقرب دعم:** {format_price(next_sup)}")
+            next_res = min([r for r in resistances if r > current_price], default=None)
+            if next_res: report_lines.append(f"🛡️ **أقرب مقاومة:** {format_price(next_res)}")
+            next_sup = max([s for s in supports if s < current_price], default=None)
+            if next_sup: report_lines.append(f"💰 **أقرب دعم:** {format_price(next_sup)}")
+            else: report_lines.append("💰 **أقرب دعم:** لا يوجد دعم واضح أدناه.")
 
-            full_report += f"--- **إطار {tf_name}** ---\n" + "\n".join(report_lines) + f"\n*السعر الحالي: {format_price(current_price)}*\n\n"
+            tf_report += "\n".join(report_lines) + f"\n*السعر الحالي: {format_price(current_price)}*\n\n"
+            report_parts.append(tf_report)
 
-        # Final Summary
-        full_report += "--- **ملخص تلاقي الإشارات** ---\n"
+        summary_report = "--- **ملخص تلاقي الإشارات** ---\n"
         total_signals = sum(overall_signals.values())
         if total_signals > 0:
             bull_perc, bear_perc = (overall_signals['bullish']/total_signals)*100, (overall_signals['bearish']/total_signals)*100
-            if bull_perc > 60: summary_text = f"🟢 **التحليل العام يميل للإيجابية** ({bull_perc:.0f}% من الإشارات صاعدة)."
-            elif bear_perc > 60: summary_text = f"🔴 **التحليل العام يميل للسلبية** ({bear_perc:.0f}% من الإشارات هابطة)."
-            else: summary_text = f"🟡 **السوق في حيرة**، الإشارات متضاربة."
-            full_report += summary_text
+            if bull_perc > 60: summary_report += f"🟢 **التحليل العام يميل للإيجابية** ({bull_perc:.0f}% من الإشارات صاعدة)."
+            elif bear_perc > 60: summary_report += f"🔴 **التحليل العام يميل للسلبية** ({bear_perc:.0f}% من الإشارات هابطة)."
+            else: summary_report += f"🟡 **السوق في حيرة**، الإشارات متضاربة."
+        else: summary_report += "لم يتمكن البوت من تكوين رأي واضح."
+        report_parts.append(summary_report)
+
+        # !جديد: تقسيم الرسالة إذا كانت طويلة
+        full_message = header + "".join(report_parts)
+        if len(full_message) <= TELEGRAM_MESSAGE_LIMIT:
+            context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=full_message, parse_mode=ParseMode.MARKDOWN)
         else:
-            full_report += "لم يتمكن البوت من تكوين رأي واضح."
-        
-        context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=full_report, parse_mode=ParseMode.MARKDOWN)
+            context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=header + report_parts[0], parse_mode=ParseMode.MARKDOWN)
+            for part in report_parts[1:]:
+                await asyncio.sleep(0.5)
+                context.bot.send_message(chat_id=chat_id, text=part, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
         logger.error(f"Error in full technical analysis for {symbol}: {e}", exc_info=True)
@@ -925,7 +918,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v16.1 - Interactive TA) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v16.2 - Robust TA) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
@@ -944,7 +937,7 @@ async def main():
         dp.bot_data['background_tasks_enabled'] = True
         
         dp.add_handler(CommandHandler("start", start_command))
-        dp.add_handler(MessageHandler(Filters.text & (~Filters.command), handle_button_press))
+        dp.add_handler(MessageHandler(Filters.text & (~Filters.command), handle_text_message))
         
         background_tasks['performance'] = asyncio.create_task(performance_tracker_loop(session))
         for platform_name in PLATFORMS:
