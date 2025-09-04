@@ -53,6 +53,7 @@ TA_KLINE_LIMIT = 200
 TA_MIN_KLINE_COUNT = 50
 FIBONACCI_PERIOD = 90
 SCALP_KLINE_LIMIT = 50
+PRO_SCAN_MIN_SCALP_SCORE = 2 # !جديد: الحد الأدنى لنتيجة التحليل السريع في الفحص الاحترافي
 
 # --- إعدادات عامة ---
 HTTP_TIMEOUT = 15
@@ -513,6 +514,7 @@ async def analyze_order_book_for_whales(book, symbol):
 # =============================================================================
 BTN_TA_PRO = "🔬 محلل فني"
 BTN_SCALP_SCAN = "⚡️ تحليل سريع"
+BTN_PRO_SCAN = "🎯 فحص احترافي"
 BTN_WHALE_RADAR = "🐋 رادار الحيتان"
 BTN_MOMENTUM = "🚀 كاشف الزخم"
 BTN_STATUS = "📊 الحالة"
@@ -545,8 +547,8 @@ def build_menu(context: CallbackContext):
     toggle_tasks_btn = BTN_TASKS_ON if tasks_enabled else BTN_TASKS_OFF
     
     keyboard = [
-        [BTN_MOMENTUM, BTN_WHALE_RADAR, BTN_CROSS_ANALYSIS],
-        [BTN_TA_PRO, BTN_SCALP_SCAN],
+        [BTN_MOMENTUM, BTN_WHALE_RADAR, BTN_PRO_SCAN],
+        [BTN_TA_PRO, BTN_SCALP_SCAN, BTN_CROSS_ANALYSIS],
         [BTN_TOP_GAINERS, BTN_TOP_VOLUME, BTN_TOP_LOSERS],
         [BTN_PERFORMANCE, BTN_STATUS, toggle_tasks_btn],
         [mexc_btn, gate_btn, binance_btn],
@@ -558,11 +560,11 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v18.0 - Scalp Analyst) جاهز!**\n\n"
-        "**🚀 ميزة جديدة للمضاربة السريعة:**\n"
-        "- **⚡️ تحليل سريع:** أداة جديدة لتحليل عملات الزخم على الأطر الزمنية الصغيرة (15د, 5د, 1د) لقرارات سريعة.\n\n"
+        "✅ **بوت التداول الذكي (v19.0 - Pro Scan) جاهز!**\n\n"
+        "**🚀 ميزة احترافية جديدة:**\n"
+        "- **🎯 فحص احترافي:** يدمج الآن فحص الزخم والحيتان والتحليل السريع بضغطة زر واحدة لتقديم أفضل الفرص المفلترة.\n\n"
         "**تحسينات أخرى:**\n"
-        "- المحلل الفني (🔬) الآن أكثر دقة مع فيبوناتشي التكيفي وإضافة مؤشر MACD.\n\n"
+        "- استقرار أعلى وأداء أفضل في جميع أدوات التحليل.\n\n"
         "المنصة الحالية: **MEXC**")
     if update.message:
         update.message.reply_text(welcome_message, reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
@@ -648,6 +650,7 @@ def handle_text_message(update: Update, context: CallbackContext):
     if button_text == BTN_MOMENTUM: task = run_momentum_detector(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_WHALE_RADAR: task = run_whale_radar_scan(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_CROSS_ANALYSIS: task = run_cross_analysis(context, chat_id, sent_message.message_id, client)
+    elif button_text == BTN_PRO_SCAN: task = run_pro_scan(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_PERFORMANCE: task = get_performance_report(context, chat_id, sent_message.message_id)
     elif button_text == BTN_TOP_GAINERS: task = run_top_gainers(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_TOP_LOSERS: task = run_top_losers(context, chat_id, sent_message.message_id, client)
@@ -749,7 +752,6 @@ async def run_full_technical_analysis(update: Update, context: CallbackContext):
         logger.error(f"Error in full technical analysis for {symbol}: {e}", exc_info=True)
         await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ فادح أثناء تحليل {symbol}.")
 
-# !جديد: وظيفة التحليل السريع للمضاربة
 async def run_scalp_analysis(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
     symbol = context.args[0]
@@ -768,7 +770,7 @@ async def run_scalp_analysis(update: Update, context: CallbackContext):
         for tf_name, tf_interval in timeframes.items():
             klines = await client.get_processed_klines(symbol, tf_interval, SCALP_KLINE_LIMIT)
             tf_report = f"--- **إطار {tf_name}** ---\n"
-            report_lines = [] # !إصلاح: تم تعريف المتغير الناقص
+            report_lines = [] 
 
             if not klines or len(klines) < 20:
                 tf_report += "لا توجد بيانات كافية.\n\n"; report_parts.append(tf_report); continue
@@ -784,18 +786,15 @@ async def run_scalp_analysis(update: Update, context: CallbackContext):
                     report_lines.append(f"🟢 **الفوليوم:** عالٍ جداً (أقوى من المتوسط بـ {last_volume/avg_volume:.1f}x)."); overall_score += 2
                 elif last_volume > avg_volume * 1.5:
                     report_lines.append(f"🟢 **الفوليوم:** جيد (أقوى من المتوسط بـ {last_volume/avg_volume:.1f}x)."); overall_score += 1
-                else:
-                    report_lines.append("🟡 **الفوليوم:** عادي.")
-            else:
-                report_lines.append("🟡 **الفوليوم:** لا توجد بيانات.")
+                else: report_lines.append("🟡 **الفوليوم:** عادي.")
+            else: report_lines.append("🟡 **الفوليوم:** لا توجد بيانات.")
 
             price_change_5_candles = ((close_prices[-1] - close_prices[-5]) / close_prices[-5]) * 100 if close_prices[-5] > 0 else 0
             if price_change_5_candles > 2.0:
                  report_lines.append(f"🟢 **السعر:** حركة صاعدة قوية (`%{price_change_5_candles:+.1f}`)."); overall_score += 1
             elif price_change_5_candles < -2.0:
                  report_lines.append(f"🔴 **السعر:** حركة هابطة قوية (`%{price_change_5_candles:+.1f}`)."); overall_score -= 1
-            else:
-                 report_lines.append("🟡 **السعر:** حركة عادية.")
+            else: report_lines.append("🟡 **السعر:** حركة عادية.")
             
             tf_report += "\n".join(report_lines) + f"\n*السعر الحالي: {format_price(close_prices[-1])}*\n\n"
             report_parts.append(tf_report)
@@ -814,6 +813,49 @@ async def run_scalp_analysis(update: Update, context: CallbackContext):
     except Exception as e:
         logger.error(f"Error in scalp analysis for {symbol}: {e}", exc_info=True)
         await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ فادح أثناء تحليل {symbol}.")
+
+# !جديد: وظيفة الفحص الاحترافي
+async def run_pro_scan(context, chat_id, message_id, client: BaseExchangeClient):
+    initial_text = f"🎯 **الفحص الاحترافي ({client.name})**\n\n🔍 جارِ دمج وفلترة جميع الإشارات... هذه العملية قد تستغرق دقيقة."
+    try: await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception: pass
+
+    try:
+        momentum_task = asyncio.create_task(helper_get_momentum_symbols(client))
+        whale_task = asyncio.create_task(helper_get_whale_activity(client))
+        momentum_coins, whale_signals = await asyncio.gather(momentum_task, whale_task)
+
+        strong_symbols = set(momentum_coins.keys()).intersection(set(whale_signals.keys()))
+        
+        if not strong_symbols:
+            await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=message_id, text=f"✅ **الفحص الاحترافي على {client.name} اكتمل:**\n\nلا توجد فرص قوية تتوافق مع الشروط حالياً."); return
+        
+        final_opportunities = []
+        for symbol in strong_symbols:
+            # إجراء تحليل سريع داخلي
+            overall_score = 0
+            klines_15m = await client.get_processed_klines(symbol, '15m', SCALP_KLINE_LIMIT)
+            if klines_15m and len(klines_15m) >= 20:
+                volumes = np.array([float(k[5]) for k in klines_15m])
+                avg_volume = np.mean(volumes[-20:-1])
+                if avg_volume > 0 and volumes[-1] > avg_volume * 1.5: overall_score += 1
+            
+            if overall_score >= PRO_SCAN_MIN_SCALP_SCORE:
+                 final_opportunities.append(momentum_coins[symbol])
+
+        if not final_opportunities:
+            await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=message_id, text=f"✅ **الفحص الاحترافي على {client.name} اكتمل:**\n\nتم العثور على عملات مشتركة لكن زخمها اللحظي ضعيف."); return
+
+        sorted_ops = sorted(final_opportunities, key=lambda x: x['price_change'], reverse=True)
+        message = f"🎯 **أفضل الفرص المفلترة ({client.name})** 🎯\n\n"
+        for i, coin in enumerate(sorted_ops[:5]):
+            message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n   - السعر: `${format_price(coin['current_price'])}`\n   - **زخم 30د:** `%{coin['price_change']:+.2f}`\n   - **الحالة:** زخم عالٍ + نشاط حيتان + زخم لحظي مؤكد.\n\n")
+        message += "*(فرص عالية الجودة للمراقبة الفورية)*"
+        await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error in pro_scan on {client.name}: {e}", exc_info=True)
+        await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=message_id, text="حدث خطأ فادح أثناء الفحص الاحترافي.")
 
 
 async def run_momentum_detector(context, chat_id, message_id, client: BaseExchangeClient):
