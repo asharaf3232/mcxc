@@ -512,7 +512,7 @@ async def analyze_order_book_for_whales(book, symbol):
 # --- 4. الوظائف التفاعلية (أوامر البوت) ---
 # =============================================================================
 BTN_TA_PRO = "🔬 محلل فني"
-BTN_SCALP_SCAN = "⚡️ تحليل سريع" # !جديد
+BTN_SCALP_SCAN = "⚡️ تحليل سريع"
 BTN_WHALE_RADAR = "🐋 رادار الحيتان"
 BTN_MOMENTUM = "🚀 كاشف الزخم"
 BTN_STATUS = "📊 الحالة"
@@ -546,7 +546,7 @@ def build_menu(context: CallbackContext):
     
     keyboard = [
         [BTN_MOMENTUM, BTN_WHALE_RADAR, BTN_CROSS_ANALYSIS],
-        [BTN_TA_PRO, BTN_SCALP_SCAN], # !جديد: إضافة الزر الجديد
+        [BTN_TA_PRO, BTN_SCALP_SCAN],
         [BTN_TOP_GAINERS, BTN_TOP_VOLUME, BTN_TOP_LOSERS],
         [BTN_PERFORMANCE, BTN_STATUS, toggle_tasks_btn],
         [mexc_btn, gate_btn, binance_btn],
@@ -768,6 +768,7 @@ async def run_scalp_analysis(update: Update, context: CallbackContext):
         for tf_name, tf_interval in timeframes.items():
             klines = await client.get_processed_klines(symbol, tf_interval, SCALP_KLINE_LIMIT)
             tf_report = f"--- **إطار {tf_name}** ---\n"
+            report_lines = [] # !إصلاح: تم تعريف المتغير الناقص
 
             if not klines or len(klines) < 20:
                 tf_report += "لا توجد بيانات كافية.\n\n"; report_parts.append(tf_report); continue
@@ -778,14 +779,17 @@ async def run_scalp_analysis(update: Update, context: CallbackContext):
             avg_volume = np.mean(volumes[-20:-1])
             last_volume = volumes[-1]
             
-            if last_volume > avg_volume * 3:
-                report_lines.append(f"🟢 **الفوليوم:** عالٍ جداً (أقوى من المتوسط بـ {last_volume/avg_volume:.1f}x)."); overall_score += 2
-            elif last_volume > avg_volume * 1.5:
-                report_lines.append(f"🟢 **الفوليوم:** جيد (أقوى من المتوسط بـ {last_volume/avg_volume:.1f}x)."); overall_score += 1
+            if avg_volume > 0:
+                if last_volume > avg_volume * 3:
+                    report_lines.append(f"🟢 **الفوليوم:** عالٍ جداً (أقوى من المتوسط بـ {last_volume/avg_volume:.1f}x)."); overall_score += 2
+                elif last_volume > avg_volume * 1.5:
+                    report_lines.append(f"🟢 **الفوليوم:** جيد (أقوى من المتوسط بـ {last_volume/avg_volume:.1f}x)."); overall_score += 1
+                else:
+                    report_lines.append("🟡 **الفوليوم:** عادي.")
             else:
-                report_lines.append("🟡 **الفوليوم:** عادي.")
+                report_lines.append("🟡 **الفوليوم:** لا توجد بيانات.")
 
-            price_change_5_candles = ((close_prices[-1] - close_prices[-5]) / close_prices[-5]) * 100
+            price_change_5_candles = ((close_prices[-1] - close_prices[-5]) / close_prices[-5]) * 100 if close_prices[-5] > 0 else 0
             if price_change_5_candles > 2.0:
                  report_lines.append(f"🟢 **السعر:** حركة صاعدة قوية (`%{price_change_5_candles:+.1f}`)."); overall_score += 1
             elif price_change_5_candles < -2.0:
