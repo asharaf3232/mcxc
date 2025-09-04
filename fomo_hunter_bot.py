@@ -53,7 +53,7 @@ TA_KLINE_LIMIT = 200
 TA_MIN_KLINE_COUNT = 50
 FIBONACCI_PERIOD = 90
 SCALP_KLINE_LIMIT = 50
-PRO_SCAN_MIN_SCALP_SCORE = 3 # !تعديل: تم ضبط الحد الأدنى لنتيجة الفحص الاحترافي
+PRO_SCAN_MIN_SCALP_SCORE = 3
 
 # --- إعدادات عامة ---
 HTTP_TIMEOUT = 15
@@ -510,7 +510,6 @@ async def analyze_order_book_for_whales(book, symbol):
     return signals
 
 async def helper_get_scalp_score(client: BaseExchangeClient, symbol: str) -> int:
-    """!جديد: وظيفة مساعدة لحساب نتيجة التحليل السريع."""
     overall_score = 0
     timeframes = {'15m': 2, '5m': 1} 
 
@@ -584,11 +583,12 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v19.0 - Pro Scan) جاهز!**\n\n"
-        "**🚀 ميزة احترافية جديدة:**\n"
-        "- **🎯 فحص احترافي:** يدمج الآن فحص الزخم والحيتان والتحليل السريع بضغطة زر واحدة لتقديم أفضل الفرص المفلترة.\n\n"
+        "✅ **بوت التداول الذكي (v19.1 - Robust Scan) جاهز!**\n\n"
+        "**🚀 ترقية الفحص الاحترافي:**\n"
+        "- تم إصلاح الخلل المنطقي وأصبحت النتائج الآن أكثر دقة.\n"
+        "- تم تحسين التوافق مع جميع المنصات (إصلاح خطأ KuCoin).\n\n"
         "**تحسينات أخرى:**\n"
-        "- استقرار أعلى وأداء أفضل في جميع أدوات التحليل.\n\n"
+        "- استقرار أعلى في جميع أدوات التحليل.\n\n"
         "المنصة الحالية: **MEXC**")
     if update.message:
         update.message.reply_text(welcome_message, reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
@@ -1122,7 +1122,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v19.0 - Pro Scan) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v19.1 - Robust Scan) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
