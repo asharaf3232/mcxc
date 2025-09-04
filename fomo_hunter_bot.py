@@ -10,7 +10,7 @@ import numpy as np
 from datetime import datetime, timedelta, UTC
 from collections import deque
 from telegram import Bot, ReplyKeyboardMarkup, Update
-from telegram.constants import ParseMode # <<< تم تعديل هذا السطر
+from telegram.constants import ParseMode
 from telegram.error import Forbidden, BadRequest
 from telegram.ext import (
     Application,
@@ -19,6 +19,165 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+
+# =============================================================================
+# --- 🔬 وحدة التحليل الفني المحسّنة (Analysis Module) 🔬 ---
+# تم دمج هذا الجزء هنا مباشرة
+# =============================================================================
+
+def calculate_atr(high_prices, low_prices, close_prices, period=14):
+    """
+    يحسب مؤشر متوسط النطاق الحقيقي (ATR) لقياس التقلبات.
+    """
+    if len(high_prices) < period:
+        return None
+
+    tr_values = []
+    for i in range(1, len(high_prices)):
+        high = high_prices[i]
+        low = low_prices[i]
+        prev_close = close_prices[i-1]
+        
+        tr1 = high - low
+        tr2 = abs(high - prev_close)
+        tr3 = abs(low - prev_close)
+        
+        true_range = max(tr1, tr2, tr3)
+        tr_values.append(true_range)
+    
+    atr = np.mean(tr_values[-period:])
+    return atr
+
+def calculate_vwap(close_prices, volumes, period=14):
+    """
+    يحسب مؤشر متوسط السعر المرجح بالحجم (VWAP).
+    """
+    if len(close_prices) < period:
+        return None
+        
+    prices = np.array(close_prices[-period:])
+    volumes = np.array(volumes[-period:])
+    
+    if np.sum(volumes) == 0:
+        return np.mean(prices) # Fallback to SMA if volume is zero
+
+    return np.sum(prices * volumes) / np.sum(volumes)
+
+def analyze_momentum_consistency(close_prices, volumes, period=10):
+    """
+    يحلل استمرارية الزخم بدلاً من الاعتماد على قفزة واحدة.
+    - يتأكد من أن 60% من الشموع الأخيرة إيجابية.
+    - يتأكد من أن الحجم يتزايد بشكل عام.
+    """
+    if len(close_prices) < period:
+        return 0 # Neutral score
+
+    recent_closes = np.array(close_prices[-period:])
+    recent_volumes = np.array(volumes[-period:])
+
+    price_increases = np.sum(np.diff(recent_closes) > 0)
+    
+    score = 0
+    # تحقق من استمرارية صعود السعر
+    if (price_increases / period) >= 0.6:
+        score += 1
+
+    # تحقق من تزايد حجم التداول
+    # نقسم الفترة إلى نصفين ونقارن متوسط الحجم
+    half_period = period // 2
+    first_half_volume_avg = np.mean(recent_volumes[:half_period])
+    second_half_volume_avg = np.mean(recent_volumes[half_period:])
+
+    if first_half_volume_avg > 0 and second_half_volume_avg > (first_half_volume_avg * 1.2):
+        score += 1
+        
+    return score
+
+async def calculate_pro_score(client, symbol: str):
+    """
+    الوظيفة التحليلية الجديدة: تحسب نقاطاً للعملة بناءً على معايير متعددة.
+    هذا هو قلب المحرك التحليلي المطور.
+    """
+    score = 0
+    analysis_details = {}
+
+    try:
+        # استخدام إطار زمني متوسط (15 دقيقة) للتحليل الشامل
+        klines = await client.get_processed_klines(symbol, '15m', 100)
+        if not klines or len(klines) < 50:
+            return 0, {} # لا يمكن التحليل ببيانات غير كافية
+
+        close_prices = np.array([float(k[4]) for k in klines])
+        high_prices = np.array([float(k[2]) for k in klines])
+        low_prices = np.array([float(k[3]) for k in klines])
+        volumes = np.array([float(k[5]) for k in klines])
+        current_price = close_prices[-1]
+
+        # 1. تحليل الاتجاه العام (نقاط: -2 إلى +2)
+        ema20 = np.mean(close_prices[-20:])
+        ema50 = np.mean(close_prices[-50:])
+        if current_price > ema20 > ema50:
+            score += 2
+            analysis_details['Trend'] = "🟢 Strong Up"
+        elif current_price > ema20:
+            score += 1
+            analysis_details['Trend'] = "🟢 Up"
+        elif current_price < ema20 < ema50:
+            score -= 2
+            analysis_details['Trend'] = "🔴 Strong Down"
+        elif current_price < ema20:
+            score -= 1
+            analysis_details['Trend'] = "🔴 Down"
+        else:
+            analysis_details['Trend'] = "🟡 Sideways"
+
+        # 2. تحليل الزخم القريب (نقاط: 0 إلى +2)
+        momentum_score = analyze_momentum_consistency(close_prices, volumes)
+        score += momentum_score
+        analysis_details['Momentum'] = f"{'🟢' * momentum_score}{'🟡' * (2-momentum_score)} ({momentum_score}/2)"
+
+        # 3. تحليل السيولة والتقلبات (نقاط: -1 إلى +1)
+        atr = calculate_atr(high_prices, low_prices, close_prices)
+        if atr:
+            # تقيس التقلبات كنسبة مئوية من السعر الحالي
+            volatility_percent = (atr / current_price) * 100 if current_price > 0 else 0
+            analysis_details['Volatility'] = f"{volatility_percent:.2f}%"
+            if volatility_percent > 7.0: # تقلبات عالية جداً قد تكون خطيرة
+                score -= 1
+            elif volatility_percent < 1.0: # تقلبات منخفضة جداً (لا توجد فرصة)
+                score -= 1
+            else: # تقلبات صحية
+                score += 1
+
+        # 4. تحليل القوة النسبية (RSI) (نقاط: -1 إلى +1)
+        deltas = np.diff(close_prices)
+        gains = deltas[deltas >= 0]
+        losses = -deltas[deltas < 0]
+        if len(gains) > 0 and len(losses) > 0:
+            avg_gain = np.mean(gains)
+            avg_loss = np.mean(losses)
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+            analysis_details['RSI'] = f"{rsi:.1f}"
+            if rsi > 75: score -= 1 # تشبع شرائي
+            elif rsi < 25: score += 1 # تشبع بيعي
+            
+        # 5. تحليل VWAP (نقاط: 0 إلى +2)
+        vwap = calculate_vwap(close_prices, volumes, period=20)
+        if vwap:
+            analysis_details['VWAP'] = f"{vwap:.8g}"
+            if current_price > vwap * 1.01: # إذا كان السعر أعلى من VWAP بنسبة 1%
+                score += 2 # إشارة قوية جداً على سيطرة المشترين
+            elif current_price > vwap:
+                score += 1
+
+        analysis_details['Final Score'] = score
+        analysis_details['Price'] = f"{current_price:.8g}"
+        return score, analysis_details
+
+    except Exception as e:
+        print(f"Error in pro_score for {symbol}: {e}")
+        return 0, {"Error": str(e)}
 
 # =============================================================================
 # --- الإعدادات الرئيسية ---
@@ -71,6 +230,8 @@ TA_MIN_KLINE_COUNT = 50
 FIBONACCI_PERIOD = 90
 SCALP_KLINE_LIMIT = 50
 PRO_SCAN_MIN_SCALP_SCORE = 3
+# الحد الأدنى من النقاط لإظهار العملة في الفحص الاحترافي
+PRO_SCAN_MIN_SCORE = 5 
 
 # --- إعدادات عامة ---
 HTTP_TIMEOUT = 15
@@ -148,7 +309,7 @@ async def broadcast_message(bot: Bot, message_text: str, parse_mode=ParseMode.MA
     if not user_ids:
         logger.warning("Broadcast requested, but no users are registered.")
         return
-        
+
     for user_id in user_ids:
         try:
             await bot.send_message(chat_id=user_id, text=message_text, parse_mode=parse_mode)
@@ -167,7 +328,7 @@ async def broadcast_message(bot: Bot, message_text: str, parse_mode=ParseMode.MA
 async def fetch_json(session: aiohttp.ClientSession, url: str, params: dict = None, headers: dict = None, retries: int = 3):
     request_headers = {'User-Agent': 'Mozilla/5.0'}
     if headers: request_headers.update(headers)
-    
+
     for attempt in range(retries):
         try:
             async with session.get(url, params=params, timeout=HTTP_TIMEOUT, headers=request_headers) as response:
@@ -251,7 +412,7 @@ class GateioClient(BaseExchangeClient):
         data = await fetch_json(self.session, f"{self.base_api_url}/spot/tickers")
         if not data: return []
         return [{'symbol': i['currency_pair'].replace('_',''), 'quoteVolume': i.get('quote_volume') or '0', 'lastPrice': i.get('last') or '0', 'priceChangePercent': float(i.get('change_percentage','0'))} for i in data if i.get('currency_pair','').endswith("_USDT")]
-    
+
     async def get_klines(self, symbol, interval, limit):
         gateio_symbol = f"{symbol[:-4]}_{symbol[-4:]}"
         api_interval = self.interval_map.get(interval, interval)
@@ -261,7 +422,7 @@ class GateioClient(BaseExchangeClient):
             data = await fetch_json(self.session, f"{self.base_api_url}/spot/candlesticks", params=params)
             if not data: return None
             return [[int(k[0])*1000, k[5], k[3], k[4], k[2], k[1]] for k in data]
-    
+
     async def get_order_book(self, symbol, limit=20):
         gateio_symbol = f"{symbol[:-4]}_{symbol[-4:]}"
         async with api_semaphore:
@@ -285,7 +446,7 @@ class BinanceClient(BaseExchangeClient):
         data = await fetch_json(self.session, f"{self.base_api_url}/api/v3/ticker/24hr")
         if not data: return []
         return [{'symbol': i['symbol'], 'quoteVolume': i.get('quoteVolume') or '0', 'lastPrice': i.get('lastPrice') or '0', 'priceChangePercent': float(i.get('priceChangePercent','0'))} for i in data if i.get('symbol','').endswith("USDT")]
-    
+
     async def get_klines(self, symbol, interval, limit):
         api_interval = self.interval_map.get(interval, interval)
         async with api_semaphore:
@@ -293,13 +454,13 @@ class BinanceClient(BaseExchangeClient):
             await asyncio.sleep(0.1)
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v3/klines", params=params)
             return [[item[0], item[1], item[2], item[3], item[4], item[5]] for item in data] if data else None
-    
+
     async def get_order_book(self, symbol, limit=20):
         async with api_semaphore:
             params = {'symbol': symbol, 'limit': limit}
             await asyncio.sleep(0.1)
             return await fetch_json(self.session, f"{self.base_api_url}/api/v3/depth", params)
-    
+
     async def get_current_price(self, symbol: str) -> float | None:
         data = await fetch_json(self.session, f"{self.base_api_url}/api/v3/ticker/price", {'symbol': symbol})
         return float(data['price']) if data and 'price' in data else None
@@ -315,7 +476,7 @@ class BybitClient(BaseExchangeClient):
         data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/tickers", params={'category': 'spot'})
         if not data or not data.get('result') or not data['result'].get('list'): return []
         return [{'symbol': i['symbol'], 'quoteVolume': i.get('turnover24h') or '0', 'lastPrice': i.get('lastPrice') or '0', 'priceChangePercent': float(i.get('price24hPcnt','0'))*100} for i in data['result']['list'] if i['symbol'].endswith("USDT")]
-    
+
     async def get_klines(self, symbol, interval, limit):
         async with api_semaphore:
             api_interval = self.interval_map.get(interval, '5')
@@ -324,7 +485,7 @@ class BybitClient(BaseExchangeClient):
             data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/kline", params=params)
             if not data or not data.get('result') or not data['result'].get('list'): return None
             return [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['result']['list']]
-    
+
     async def get_order_book(self, symbol, limit=20):
         async with api_semaphore:
             params = {'category': 'spot', 'symbol': symbol, 'limit': limit}
@@ -332,7 +493,7 @@ class BybitClient(BaseExchangeClient):
             data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/orderbook", params)
             if not data or not data.get('result'): return None
             return {'bids': data['result'].get('bids', []), 'asks': data['result'].get('asks', [])}
-    
+
     async def get_current_price(self, symbol: str) -> float | None:
         data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/tickers", params={'category': 'spot', 'symbol': symbol})
         if not data or not data.get('result') or not data['result'].get('list'): return None
@@ -349,7 +510,7 @@ class KucoinClient(BaseExchangeClient):
         data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/allTickers")
         if not data or not data.get('data') or not data['data'].get('ticker'): return []
         return [{'symbol': i['symbol'].replace('-',''), 'quoteVolume': i.get('volValue') or '0', 'lastPrice': i.get('last') or '0', 'priceChangePercent': float(i.get('changeRate','0'))*100} for i in data['data']['ticker'] if i.get('symbol','').endswith("-USDT")]
-    
+
     async def get_klines(self, symbol, interval, limit):
         kucoin_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
         api_interval = self.interval_map.get(interval, '5min')
@@ -359,14 +520,14 @@ class KucoinClient(BaseExchangeClient):
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/candles", params=params)
             if not data or not data.get('data'): return None
             return [[int(k[0])*1000, k[2], k[3], k[4], k[1], k[5]] for k in data['data']]
-    
+
     async def get_order_book(self, symbol, limit=20):
         kucoin_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
         async with api_semaphore:
             params = {'symbol': kucoin_symbol}
             await asyncio.sleep(0.1)
             return await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/orderbook/level2_20", params)
-    
+
     async def get_current_price(self, symbol: str) -> float | None:
         kucoin_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
         data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/orderbook/level1", {'symbol': kucoin_symbol})
@@ -392,7 +553,7 @@ class OkxClient(BaseExchangeClient):
                     results.append({'symbol': i['instId'].replace('-',''), 'quoteVolume': i.get('volCcy24h') or '0', 'lastPrice': i.get('last') or '0', 'priceChangePercent': cp})
                 except (ValueError, TypeError): continue
         return results
-    
+
     async def get_klines(self, symbol, interval, limit):
         api_interval = self.interval_map.get(interval, '5m')
         okx_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
@@ -402,7 +563,7 @@ class OkxClient(BaseExchangeClient):
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/candles", params=params)
             if not data or not data.get('data'): return None
             return [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['data']]
-    
+
     async def get_order_book(self, symbol, limit=20):
         okx_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
         async with api_semaphore:
@@ -412,7 +573,7 @@ class OkxClient(BaseExchangeClient):
             if not data or not data.get('data'): return None
             book_data = data['data'][0]
             return {'bids': book_data.get('bids',[]), 'asks': book_data.get('asks',[])}
-    
+
     async def get_current_price(self, symbol: str) -> float | None:
         okx_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
         data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/tickers", params={'instId': okx_symbol})
@@ -444,18 +605,18 @@ def calculate_ema(prices, period):
 def calculate_sma(prices, period):
     if len(prices) < period: return None
     return np.mean(prices[-period:])
-    
+
 def calculate_macd(prices, fast_period=12, slow_period=26, signal_period=9):
     if len(prices) < slow_period: return None, None
     ema_fast = calculate_ema_series(prices, fast_period)
     ema_slow = calculate_ema_series(prices, slow_period)
-    
+
     if not ema_fast or not ema_slow: return None, None
     ema_fast = ema_fast[len(ema_fast) - len(ema_slow):]
-    
+
     macd_line_series = np.array(ema_fast) - np.array(ema_slow)
     signal_line_series = calculate_ema_series(macd_line_series.tolist(), signal_period)
-    
+
     if not signal_line_series: return None, None
     return macd_line_series[-1], signal_line_series[-1]
 
@@ -496,12 +657,12 @@ def calculate_fibonacci_retracement(high_prices, low_prices, period=FIBONACCI_PE
     else:
         recent_highs = high_prices[-period:]
         recent_lows = low_prices[-period:]
-        
+
     max_price = np.max(recent_highs)
     min_price = np.min(recent_lows)
     difference = max_price - min_price
     if difference == 0: return {}
-    
+
     levels = {
         'level_0.382': max_price - (difference * 0.382),
         'level_0.5': max_price - (difference * 0.5),
@@ -602,10 +763,10 @@ async def helper_get_scalp_score(client: BaseExchangeClient, symbol: str) -> int
 
         volumes = np.array([float(k[5]) for k in klines])
         close_prices = np.array([float(k[4]) for k in klines])
-        
+
         avg_volume = np.mean(volumes[-20:-1])
         last_volume = volumes[-1]
-        
+
         if avg_volume > 0 and last_volume > avg_volume * 1.5:
             overall_score += 1 * weight
 
@@ -643,7 +804,7 @@ def build_menu(context: ContextTypes.DEFAULT_TYPE):
     bot_data = context.bot_data
     selected_exchange = user_data.get('exchange', 'mexc')
     tasks_enabled = bot_data.get('background_tasks_enabled', True)
-    
+
     mexc_btn = f"✅ {BTN_SELECT_MEXC}" if selected_exchange == 'mexc' else BTN_SELECT_MEXC
     gate_btn = f"✅ {BTN_SELECT_GATEIO}" if selected_exchange == 'gate.io' else BTN_SELECT_GATEIO
     binance_btn = f"✅ {BTN_SELECT_BINANCE}" if selected_exchange == 'binance' else BTN_SELECT_BINANCE
@@ -651,7 +812,7 @@ def build_menu(context: ContextTypes.DEFAULT_TYPE):
     kucoin_btn = f"✅ {BTN_SELECT_KUCOIN}" if selected_exchange == 'kucoin' else BTN_SELECT_KUCOIN
     okx_btn = f"✅ {BTN_SELECT_OKX}" if selected_exchange == 'okx' else BTN_SELECT_OKX
     toggle_tasks_btn = BTN_TASKS_ON if tasks_enabled else BTN_TASKS_OFF
-    
+
     keyboard = [
         [BTN_PRO_SCAN, BTN_MOMENTUM, BTN_WHALE_RADAR],
         [BTN_TA_PRO, BTN_SCALP_SCAN, BTN_SNIPER_LIST],
@@ -700,7 +861,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = f"📊 **حالة البوت** 📊\n\n"
     message += f"**- المستخدمون المسجلون:** `{registered_users}`\n"
     message += f"**- المهام الخلفية:** {'🟢 نشطة' if tasks_enabled else '🔴 متوقفة'}\n\n"
-    
+
     for platform in PLATFORMS:
         hunts_count = len(active_hunts.get(platform, {}))
         perf_count = len(performance_tracker.get(platform, {}))
@@ -713,7 +874,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
-    
+
     text = update.message.text.strip()
 
     # --- معالجة المدخلات المعلقة ---
@@ -735,7 +896,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # --- معالجة الأزرار ---
     button_text = text.replace("✅ ", "")
-    
+
     if button_text == BTN_TA_PRO:
         context.user_data['awaiting_symbol_for_ta'] = True
         await update.message.reply_text("🔬 يرجى إرسال رمز العملة للتحليل المعمق (مثال: `BTC` أو `SOLUSDT`)", parse_mode=ParseMode.MARKDOWN)
@@ -745,7 +906,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data['awaiting_symbol_for_scalp'] = True
         await update.message.reply_text("⚡️ يرجى إرسال رمز العملة للتحليل السريع (مثال: `PEPE` أو `WIFUSDT`)", parse_mode=ParseMode.MARKDOWN)
         return
-        
+
     if button_text == BTN_SNIPER_LIST:
         await show_sniper_watchlist(update, context)
         return
@@ -760,7 +921,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if button_text == BTN_STATUS:
         await status_command(update, context)
         return
-        
+
     # --- معالجة الأوامر التي تتطلب استجابة ---
     chat_id = update.message.chat_id
     session = context.application.bot_data['session']
@@ -769,9 +930,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not client:
         await update.message.reply_text("حدث خطأ في اختيار المنصة. يرجى المحاولة مرة أخرى.")
         return
-        
+
     sent_message = await context.bot.send_message(chat_id=chat_id, text=f"🔍 جارِ تنفيذ طلبك على منصة {client.name}...")
-    
+
     task_coro = None
     if button_text == BTN_MOMENTUM: task_coro = run_momentum_detector(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_WHALE_RADAR: task_coro = run_whale_radar_scan(context, chat_id, sent_message.message_id, client)
@@ -798,7 +959,7 @@ async def send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, te
         current_part += line + '\n'
     if current_part:
         parts.append(current_part)
-    
+
     for part in parts:
         await context.bot.send_message(chat_id=chat_id, text=part, **kwargs)
         await asyncio.sleep(0.5)
@@ -806,12 +967,12 @@ async def send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, te
 async def run_full_technical_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     symbol = context.args[0]
-    
+
     current_exchange = context.user_data.get('exchange', 'mexc')
     client = get_exchange_client(current_exchange, context.application.bot_data['session'])
-    
+
     sent_message = await context.bot.send_message(chat_id=chat_id, text=f"🔬 جارِ إجراء تحليل فني شامل لـ ${symbol} على {client.name}...")
-    
+
     try:
         timeframes = {'يومي': '1d', '4 ساعات': '4h', 'ساعة': '1h'}
         tf_weights = {'يومي': 3, '4 ساعات': 2, 'ساعة': 1}
@@ -822,7 +983,7 @@ async def run_full_technical_analysis(update: Update, context: ContextTypes.DEFA
         for tf_name, tf_interval in timeframes.items():
             klines = await client.get_processed_klines(symbol, tf_interval, TA_KLINE_LIMIT)
             tf_report = f"--- **إطار {tf_name}** ---\n"
-            
+
             if not klines or len(klines) < TA_MIN_KLINE_COUNT:
                 tf_report += "لا توجد بيانات كافية للتحليل.\n\n"; report_parts.append(tf_report); continue
 
@@ -832,7 +993,7 @@ async def run_full_technical_analysis(update: Update, context: ContextTypes.DEFA
             current_price = close_prices[-1]
             report_lines = []
             weight = tf_weights[tf_name]
-            
+
             ema21, ema50, sma100 = calculate_ema(close_prices, 21), calculate_ema(close_prices, 50), calculate_sma(close_prices, 100)
             trend_text, trend_score = analyze_trend(current_price, ema21, ema50, sma100)
             report_lines.append(f"**الاتجاه:** {trend_text}"); overall_score += trend_score * weight
@@ -869,7 +1030,7 @@ async def run_full_technical_analysis(update: Update, context: ContextTypes.DEFA
         elif overall_score < 0: summary_report += f"🔴 **التحليل العام يميل للسلبية (النقاط: {overall_score}).**"
         else: summary_report += f"🟡 **السوق في حيرة، الإشارات متضاربة (النقاط: {overall_score}).**"
         report_parts.append(summary_report)
-        
+
         await context.bot.delete_message(chat_id=chat_id, message_id=sent_message.message_id)
         full_message = header + "".join(report_parts)
         await send_long_message(context, chat_id, full_message, parse_mode=ParseMode.MARKDOWN)
@@ -877,16 +1038,16 @@ async def run_full_technical_analysis(update: Update, context: ContextTypes.DEFA
     except Exception as e:
         logger.error(f"Error in full technical analysis for {symbol}: {e}", exc_info=True)
         await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ فادح أثناء تحليل {symbol}.")
-        
+
 async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     symbol = context.args[0]
-    
+
     current_exchange = context.user_data.get('exchange', 'mexc')
     client = get_exchange_client(current_exchange, context.application.bot_data['session'])
-    
+
     sent_message = await context.bot.send_message(chat_id=chat_id, text=f"⚡️ جارِ إجراء تحليل سريع لـ ${symbol} على {client.name}...")
-    
+
     try:
         timeframes = {'15 دقيقة': '15m', '5 دقائق': '5m', 'دقيقة': '1m'}
         report_parts = []
@@ -903,10 +1064,10 @@ async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             volumes = np.array([float(k[5]) for k in klines])
             close_prices = np.array([float(k[4]) for k in klines])
-            
+
             avg_volume = np.mean(volumes[-20:-1])
             last_volume = volumes[-1]
-            
+
             if avg_volume > 0:
                 if last_volume > avg_volume * 3:
                     report_lines.append(f"🟢 **الفوليوم:** عالٍ جداً (أقوى من المتوسط بـ {last_volume/avg_volume:.1f}x)."); overall_score += 2
@@ -921,7 +1082,7 @@ async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
             elif price_change_5_candles < -2.0:
                  report_lines.append(f"🔴 **السعر:** حركة هابطة قوية (`%{price_change_5_candles:+.1f}`)."); overall_score -= 1
             else: report_lines.append("🟡 **السعر:** حركة عادية.")
-            
+
             tf_report += "\n".join(report_lines) + f"\n*السعر الحالي: {format_price(close_prices[-1])}*\n\n"
             report_parts.append(tf_report)
 
@@ -941,34 +1102,55 @@ async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ فادح أثناء تحليل {symbol}.")
 
 async def run_pro_scan(context, chat_id, message_id, client: BaseExchangeClient):
-    initial_text = f"🎯 **الفحص الاحترافي ({client.name})**\n\n🔍 جارِ دمج وفلترة جميع الإشارات... هذه العملية قد تستغرق دقيقة."
-    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
-    except Exception: pass
+    initial_text = f"🎯 **الفحص الاحترافي المطور ({client.name})**\n\n🔍 جارِ تحليل السوق وتصنيف العملات... هذه العملية قد تستغرق دقيقة."
+    try:
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception:
+        pass
 
     try:
-        momentum_task = asyncio.create_task(helper_get_momentum_symbols(client))
-        whale_task = asyncio.create_task(helper_get_whale_activity(client))
-        momentum_coins, whale_signals = await asyncio.gather(momentum_task, whale_task)
+        market_data = await client.get_market_data()
+        if not market_data:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق.")
+            return
 
-        strong_symbols = set(momentum_coins.keys()).intersection(set(whale_signals.keys()))
+        # فلترة أولية للعملات بناءً على الحجم والسعر
+        candidates = [
+            p['symbol'] for p in market_data 
+            if MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume', '0')) <= MOMENTUM_MAX_VOLUME_24H
+            and float(p.get('lastPrice', '1')) <= MOMENTUM_MAX_PRICE
+        ]
+
+        if not candidates:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **الفحص الاحترافي على {client.name} اكتمل:**\n\nلا توجد عملات مرشحة ضمن نطاق السعر والحجم المطلوبين حالياً.")
+            return
+
+        # تحليل كل عملة مرشحة لحساب نقاطها
+        tasks = [calculate_pro_score(client, symbol) for symbol in candidates[:100]] # حد أقصى 100 عملة للفحص
+        results = await asyncio.gather(*tasks)
+
+        strong_opportunities = []
+        for i, (score, details) in enumerate(results):
+            if score >= PRO_SCAN_MIN_SCORE:
+                details['symbol'] = candidates[i]
+                strong_opportunities.append(details)
         
-        if not strong_symbols:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **الفحص الاحترافي على {client.name} اكتمل:**\n\nلا توجد فرص قوية تتوافق مع الشروط حالياً."); return
+        if not strong_opportunities:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **الفحص الاحترافي على {client.name} اكتمل:**\n\nلم يتم العثور على فرص قوية تتجاوز حد النقاط المطلوب ({PRO_SCAN_MIN_SCORE}).")
+            return
+
+        # ترتيب الفرص حسب النقاط الأعلى
+        sorted_ops = sorted(strong_opportunities, key=lambda x: x['Final Score'], reverse=True)
         
-        final_opportunities = []
-        for symbol in strong_symbols:
-            scalp_score = await helper_get_scalp_score(client, symbol)
-            if scalp_score >= PRO_SCAN_MIN_SCALP_SCORE:
-                 final_opportunities.append(momentum_coins[symbol])
-
-        if not final_opportunities:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **الفحص الاحترافي على {client.name} اكتمل:**\n\nتم العثور على عملات مشتركة لكن زخمها اللحظي ضعيف."); return
-
-        sorted_ops = sorted(final_opportunities, key=lambda x: x['price_change'], reverse=True)
-        message = f"🎯 **أفضل الفرص المفلترة ({client.name})** 🎯\n\n"
-        for i, coin in enumerate(sorted_ops[:5]):
-            message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n    - السعر: `${format_price(coin['current_price'])}`\n    - **زخم 30د:** `%{coin['price_change']:+.2f}`\n    - **الحالة:** زخم عالٍ + نشاط حيتان + زخم لحظي مؤكد.\n\n")
-        message += "*(فرص عالية الجودة للمراقبة الفورية)*"
+        message = f"🎯 **أفضل الفرص حسب النقاط ({client.name})** 🎯\n\n"
+        for i, coin_details in enumerate(sorted_ops[:5]): # عرض أفضل 5
+            message += (f"**{i+1}. ${coin_details['symbol'].replace('USDT', '')}**\n"
+                        f"    - **النقاط:** `{coin_details['Final Score']}` ⭐\n"
+                        f"    - **السعر:** `${format_price(coin_details.get('Price', 'N/A'))}`\n"
+                        f"    - **الاتجاه:** `{coin_details.get('Trend', 'N/A')}`\n"
+                        f"    - **الزخم:** `{coin_details.get('Momentum', 'N/A')}`\n"
+                        f"    - **التقلب:** `{coin_details.get('Volatility', 'N/A')}`\n\n")
+        message += "*(تم تحليل وتقييم هذه العملات بناءً على عدة مؤشرات فنية)*"
         await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
@@ -1096,10 +1278,10 @@ async def show_sniper_watchlist(update: Update, context: ContextTypes.DEFAULT_TY
             if len(watchlist) > 5:
                 message += f"    *... و {len(watchlist) - 5} عملات أخرى.*\n"
             message += "\n"
-    
+
     if not any_watched:
         message += "لا توجد أهداف حالية في قائمة المراقبة. يقوم الرادار بالبحث..."
-        
+
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
 # =============================================================================
@@ -1137,7 +1319,7 @@ async def fomo_hunter_loop(client: BaseExchangeClient, bot: Bot, bot_data: dict)
             message = f"🚨 **تنبيه تلقائي من صياد الفومو ({client.name})** 🚨\n\n"
             for i, coin in enumerate(sorted_coins[:5]):
                 message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n    - السعر: `${format_price(coin['current_price'])}`\n    - **زخم آخر 30 دقيقة: `%{coin['price_change']:+.2f}`**\n\n")
-            
+
             await broadcast_message(bot, message)
 
             for coin in sorted_coins[:5]:
@@ -1197,7 +1379,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession, bot: Bot):
                         tracker['current_price'] = current_price
                         if current_price > tracker.get('high_price', 0):
                             tracker['high_price'] = current_price
-                        
+
                         high_price = tracker['high_price']
                         is_momentum_source = "الزخم" in data.get('source', '') or "الفومو" in data.get('source', '')
                         if is_momentum_source and not tracker.get('momentum_lost_alerted', False) and high_price > 0:
@@ -1223,9 +1405,9 @@ async def coiled_spring_radar_loop(client: BaseExchangeClient, bot_data: dict):
         try:
             market_data = await client.get_market_data()
             if not market_data: continue
-            
+
             candidates = [p for p in market_data if float(p.get('quoteVolume', '0')) > SNIPER_MIN_USDT_VOLUME]
-            
+
             async def check_candidate(symbol):
                 klines = await client.get_processed_klines(symbol, '15m', int(SNIPER_COMPRESSION_PERIOD_HOURS * 4))
                 if not klines or len(klines) < int(SNIPER_COMPRESSION_PERIOD_HOURS * 4): return
@@ -1236,10 +1418,10 @@ async def coiled_spring_radar_loop(client: BaseExchangeClient, bot_data: dict):
 
                 highest_high = np.max(high_prices)
                 lowest_low = np.min(low_prices)
-                
+
                 if lowest_low == 0: return
                 volatility = ((highest_high - lowest_low) / lowest_low) * 100
-                
+
                 if volatility <= SNIPER_MAX_VOLATILITY_PERCENT:
                     avg_volume = np.mean(volumes)
                     if symbol not in sniper_watchlist[client.name]:
@@ -1255,36 +1437,46 @@ async def coiled_spring_radar_loop(client: BaseExchangeClient, bot_data: dict):
         except Exception as e:
             logger.error(f"Error in coiled_spring_radar_loop for {client.name}: {e}", exc_info=True)
 
-
 async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: dict):
     if not client: return
     logger.info(f"Sniper Trigger background task started for {client.name}.")
     while True:
         await asyncio.sleep(SNIPER_TRIGGER_RUN_EVERY_SECONDS)
         if not bot_data.get('background_tasks_enabled', True): continue
-        
+
         watchlist_copy = list(sniper_watchlist[client.name].items())
         if not watchlist_copy: continue
 
         for symbol, data in watchlist_copy:
             try:
-                klines = await client.get_processed_klines(symbol, '5m', 5)
-                if not klines or len(klines) < 2: continue
+                klines = await client.get_processed_klines(symbol, '5m', 20) # نحتاج بيانات أكثر لحساب VWAP
+                if not klines or len(klines) < 20: continue
 
                 current_price = float(klines[-1][4])
                 current_volume = float(klines[-1][5])
                 
-                if current_price > data['high'] and current_volume > (data['avg_volume'] * SNIPER_BREAKOUT_VOLUME_MULTIPLIER):
+                # حساب VWAP على إطار 5 دقائق
+                close_prices_5m = [float(k[4]) for k in klines]
+                volumes_5m = [float(k[5]) for k in klines]
+                vwap_5m = calculate_vwap(close_prices_5m, volumes_5m, period=14)
+
+                # شرط الاختراق المطور
+                is_breakout_price = current_price > data['high']
+                is_breakout_volume = current_volume > (data['avg_volume'] * SNIPER_BREAKOUT_VOLUME_MULTIPLIER)
+                is_above_vwap = vwap_5m and current_price > vwap_5m
+
+                if is_breakout_price and is_breakout_volume and is_above_vwap:
                     message = (
                         f"🎯 **تنبيه قناص: اختراق مؤكد!** 🎯\n\n"
                         f"**العملة:** `${symbol.replace('USDT', '')}` ({client.name})\n"
                         f"**النمط:** اختراق نطاق تجميعي استمر لـ {data['duration_hours']} ساعات.\n"
-                        f"**سعر الاختراق:** `{format_price(current_price)}`\n\n"
+                        f"**سعر الاختراق:** `{format_price(current_price)}`\n"
+                        f"**التأكيد:** السعر فوق VWAP وحجم التداول عالٍ.\n\n"
                         f"*(إشارة عالية الدقة، لحظة الانطلاق المحتملة)*"
                     )
                     await broadcast_message(bot, message)
                     logger.info(f"SNIPER TRIGGER ({client.name}): Breakout detected for {symbol}!")
-                    
+
                     if symbol in sniper_watchlist[client.name]:
                         del sniper_watchlist[client.name][symbol]
 
@@ -1298,7 +1490,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
 # =============================================================================
 async def send_startup_message(bot: Bot):
     try:
-        message = "✅ **بوت الصياد الذكي (v22.1 - Async) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت الصياد الذكي (v23.0 - التحليل المطور) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         await broadcast_message(bot, message)
         logger.info("Startup message sent successfully to all users.")
     except Exception as e:
@@ -1312,7 +1504,7 @@ async def post_init(application: Application):
 
     bot_instance = application.bot
     bot_data = application.bot_data
-    
+
     # بدء المهام الخلفية
     application.bot_data['task_performance'] = asyncio.create_task(performance_tracker_loop(session, bot_instance))
     for platform_name in PLATFORMS:
@@ -1322,7 +1514,7 @@ async def post_init(application: Application):
             application.bot_data[f'task_listings_{platform_name}'] = asyncio.create_task(new_listings_sniper_loop(client, bot_instance, bot_data))
             application.bot_data[f'task_sniper_radar_{platform_name}'] = asyncio.create_task(coiled_spring_radar_loop(client, bot_data))
             application.bot_data[f'task_sniper_trigger_{platform_name}'] = asyncio.create_task(breakout_trigger_loop(client, bot_instance, bot_data))
-    
+
     await send_startup_message(bot_instance)
 
 def main() -> None:
@@ -1330,20 +1522,20 @@ def main() -> None:
     if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN:
         logger.critical("FATAL ERROR: Bot token is not set.")
         return
-    
+
     setup_database()
-        
+
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
+
     application.bot_data['background_tasks_enabled'] = True
-    
+
     # إضافة المعالجات
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-    
+
     # ربط دالة المهام الخلفية
     application.post_init = post_init
-    
+
     # تشغيل البوت
     logger.info("Telegram bot is starting...")
     application.run_polling()
