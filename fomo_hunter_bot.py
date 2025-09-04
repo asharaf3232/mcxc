@@ -9,7 +9,8 @@ import time
 import numpy as np
 from datetime import datetime, timedelta, UTC
 from collections import deque
-from telegram import Bot, ParseMode, ReplyKeyboardMarkup, Update
+from telegram import Bot, ReplyKeyboardMarkup, Update
+from telegram.constants import ParseMode # <<< تم تعديل هذا السطر
 from telegram.error import Forbidden, BadRequest
 from telegram.ext import (
     Application,
