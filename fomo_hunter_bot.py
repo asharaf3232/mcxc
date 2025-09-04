@@ -56,7 +56,7 @@ MARKET_MOVERS_MIN_VOLUME = 50000
 
 # --- إعدادات التحليل الفني ---
 TA_KLINE_LIMIT = 200
-TA_MIN_KLINE_COUNT = 50 # !جديد: تخفيض الحد الأدنى للشموع المطلوبة للتحليل
+TA_MIN_KLINE_COUNT = 50
 
 # --- إعدادات عامة ---
 HTTP_TIMEOUT = 15
@@ -270,7 +270,8 @@ class KucoinClient(BaseExchangeClient):
             data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/candles", params=params)
             if not data or not data.get('data'): return None
             klines = [[int(k[0])*1000, k[2], k[3], k[4], k[1], k[5]] for k in data['data']]
-            return klines[:limit]
+            klines.sort(key=lambda x: x[0]) # Kucoin returns newest first, sort to be consistent
+            return klines
     
     async def get_order_book(self, symbol, limit=20):
         kucoin_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
@@ -342,11 +343,12 @@ def get_exchange_client(exchange_name, session):
 # =============================================================================
 def calculate_ema(prices, period):
     if len(prices) < period: return None
-    multiplier = 2 / (period + 1)
-    ema = np.mean(prices[:period])
-    for price in prices[period:]:
-        ema = (price - ema) * multiplier + ema
-    return ema
+    prices_series = np.asarray(prices)
+    weights = np.exp(np.linspace(-1., 0., period))
+    weights /= weights.sum()
+    a = np.convolve(prices_series, weights, mode='full')[:len(prices_series)]
+    a[:period] = a[period]
+    return a[-1]
 
 def calculate_sma(prices, period):
     if len(prices) < period: return None
@@ -381,6 +383,19 @@ def find_support_resistance(high_prices, low_prices, window=10):
         if low_prices[i] == min(low_prices[i-window:i+window+1]):
             supports.append(low_prices[i])
     return sorted(list(set(supports)), reverse=True), sorted(list(set(resistances)), reverse=True)
+
+def calculate_fibonacci_retracement(high_prices, low_prices):
+    max_price = np.max(high_prices)
+    min_price = np.min(low_prices)
+    difference = max_price - min_price
+    
+    levels = {
+        'level_0.236': max_price - (difference * 0.236),
+        'level_0.382': max_price - (difference * 0.382),
+        'level_0.5': max_price - (difference * 0.5),
+        'level_0.618': max_price - (difference * 0.618),
+    }
+    return levels
 
 # =============================================================================
 # --- الوظائف المساعدة للتحليل ---
@@ -500,12 +515,11 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v16.2 - Robust TA) جاهز!**\n\n"
-        "**🔥 ميزة احترافية جديدة:**\n"
-        "للحصول على تحليل فني مفصل، اضغط على زر **🔬 محلل فني** وأرسل رمز العملة.\n\n"
-        "**تحسينات أخرى:**\n"
-        "- إصلاح مشكلة انقطاع التقارير الطويلة.\n"
-        "- تحليل العملات الجديدة ببيانات أقل.\n\n"
+        "✅ **بوت التداول الذكي (v16.3 - Smart TA) جاهز!**\n\n"
+        "**🚀 ترقية كبرى للمحلل الفني:**\n"
+        "- **ملخص ذكي:** يعطي وزناً أكبر للإطارات الزمنية الأعلى.\n"
+        "- **فيبوناتشي:** إضافة مستويات فيبوناتشي للتحليل.\n"
+        "- **إصلاحات:** حل مشكلة البيانات الناقصة لإطار الساعة.\n\n"
         "المنصة الحالية: **MEXC**")
     if update.message:
         update.message.reply_text(welcome_message, reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
@@ -596,44 +610,47 @@ async def run_full_technical_analysis(update: Update, context: CallbackContext):
     
     try:
         timeframes = {'يومي': '1d', '4 ساعات': '4h', 'ساعة': '1h'}
+        tf_weights = {'يومي': 3, '4 ساعات': 2, 'ساعة': 1} # !جديد: أوزان الأطر الزمنية
         report_parts = []
         header = f"📊 **التحليل الفني المفصل لـ ${symbol}** ({client.name})\n_{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_\n\n"
-        overall_signals = {'bullish': 0, 'bearish': 0, 'neutral': 0}
+        overall_score = 0 # !جديد: نظام النقاط بدل العد
 
         for tf_name, tf_interval in timeframes.items():
-            klines = await client.get_klines(symbol, tf_interval, TA_KLINE_LIMIT)
+            full_klines = await client.get_klines(symbol, tf_interval, TA_KLINE_LIMIT)
             tf_report = f"--- **إطار {tf_name}** ---\n"
             
-            if not klines or len(klines) < TA_MIN_KLINE_COUNT:
+            if not full_klines or len(full_klines) < TA_MIN_KLINE_COUNT:
                 tf_report += "لا توجد بيانات كافية للتحليل.\n\n"
                 report_parts.append(tf_report)
                 continue
 
+            klines = full_klines[-TA_KLINE_LIMIT:] # !إصلاح: التأكد من استخدام أحدث البيانات
             close_prices = np.array([float(k[4]) for k in klines])
             high_prices = np.array([float(k[2]) for k in klines])
             low_prices = np.array([float(k[3]) for k in klines])
             current_price = close_prices[-1]
             report_lines = []
+            weight = tf_weights[tf_name]
             
             ema21, ema50, sma100 = calculate_ema(close_prices, 21), calculate_ema(close_prices, 50), calculate_sma(close_prices, 100)
             if ema21 and ema50 and sma100:
                 if current_price > ema21 > ema50 > sma100:
-                    report_lines.append("🟢 **المتوسطات:** إيجابية، السعر فوق جميع المتوسطات بترتيب مثالي."); overall_signals['bullish'] += 1
+                    report_lines.append("🟢 **المتوسطات:** إيجابية، بترتيب صاعد مثالي."); overall_score += 1 * weight
                 elif current_price < ema21 < ema50 < sma100:
-                    report_lines.append("🔴 **المتوسطات:** سلبية، السعر تحت جميع المتوسطات بترتيب هابط."); overall_signals['bearish'] += 1
-                else: report_lines.append("🟡 **المتوسطات:** متضاربة."); overall_signals['neutral'] += 1
+                    report_lines.append("🔴 **المتوسطات:** سلبية، بترتيب هابط واضح."); overall_score -= 1 * weight
+                else: report_lines.append("🟡 **المتوسطات:** متضاربة.")
 
             rsi = calculate_rsi(close_prices)
             if rsi:
-                if rsi > 70: report_lines.append(f"🔴 **RSI ({rsi:.1f}):** تشبع شرائي."); overall_signals['bearish'] += 1
-                elif rsi < 30: report_lines.append(f"🟢 **RSI ({rsi:.1f}):** تشبع بيعي."); overall_signals['bullish'] += 1
-                else: report_lines.append(f"🟡 **RSI ({rsi:.1f}):** محايد."); overall_signals['neutral'] += 1
+                if rsi > 70: report_lines.append(f"🔴 **RSI ({rsi:.1f}):** تشبع شرائي."); overall_score -= 1 * weight
+                elif rsi < 30: report_lines.append(f"🟢 **RSI ({rsi:.1f}):** تشبع بيعي."); overall_score += 1 * weight
+                else: report_lines.append(f"🟡 **RSI ({rsi:.1f}):** محايد.")
 
             upper, middle, lower = calculate_bollinger_bands(close_prices)
             if upper:
-                if current_price > upper: report_lines.append("🔴 **Bollinger:** السعر اخترق الحد العلوي."); overall_signals['bearish'] += 1
-                elif current_price < lower: report_lines.append("🟢 **Bollinger:** السعر اخترق الحد السفلي."); overall_signals['bullish'] += 1
-                else: report_lines.append("🟡 **Bollinger:** السعر داخل النطاق."); overall_signals['neutral'] += 1
+                if current_price > upper: report_lines.append("🔴 **Bollinger:** السعر اخترق الحد العلوي."); overall_score -= 1 * weight
+                elif current_price < lower: report_lines.append("🟢 **Bollinger:** السعر اخترق الحد السفلي."); overall_score += 1 * weight
+                else: report_lines.append("🟡 **Bollinger:** السعر داخل النطاق.")
             
             supports, resistances = find_support_resistance(high_prices, low_prices)
             next_res = min([r for r in resistances if r > current_price], default=None)
@@ -642,28 +659,30 @@ async def run_full_technical_analysis(update: Update, context: CallbackContext):
             if next_sup: report_lines.append(f"💰 **أقرب دعم:** {format_price(next_sup)}")
             else: report_lines.append("💰 **أقرب دعم:** لا يوجد دعم واضح أدناه.")
 
+            # !جديد: إضافة مستويات فيبوناتشي
+            fib_levels = calculate_fibonacci_retracement(high_prices, low_prices)
+            report_lines.append(f"🎚️ **فيبوناتشي:** 0.5: `{format_price(fib_levels['level_0.5'])}` | 0.618: `{format_price(fib_levels['level_0.618'])}`")
+
             tf_report += "\n".join(report_lines) + f"\n*السعر الحالي: {format_price(current_price)}*\n\n"
             report_parts.append(tf_report)
 
-        summary_report = "--- **ملخص تلاقي الإشارات** ---\n"
-        total_signals = sum(overall_signals.values())
-        if total_signals > 0:
-            bull_perc, bear_perc = (overall_signals['bullish']/total_signals)*100, (overall_signals['bearish']/total_signals)*100
-            if bull_perc > 60: summary_report += f"🟢 **التحليل العام يميل للإيجابية** ({bull_perc:.0f}% من الإشارات صاعدة)."
-            elif bear_perc > 60: summary_report += f"🔴 **التحليل العام يميل للسلبية** ({bear_perc:.0f}% من الإشارات هابطة)."
-            else: summary_report += f"🟡 **السوق في حيرة**، الإشارات متضاربة."
-        else: summary_report += "لم يتمكن البوت من تكوين رأي واضح."
+        summary_report = "--- **ملخص التحليل الذكي** ---\n"
+        if overall_score > 3: summary_report += f"🟢 **التحليل العام يميل للإيجابية بقوة (النقاط: {overall_score}).**"
+        elif overall_score > 0: summary_report += f"🟢 **التحليل العام يميل للإيجابية (النقاط: {overall_score}).**"
+        elif overall_score < -3: summary_report += f"🔴 **التحليل العام يميل للسلبية بقوة (النقاط: {overall_score}).**"
+        elif overall_score < 0: summary_report += f"🔴 **التحليل العام يميل للسلبية (النقاط: {overall_score}).**"
+        else: summary_report += f"🟡 **السوق في حيرة، الإشارات متضاربة (النقاط: {overall_score}).**"
         report_parts.append(summary_report)
 
-        # !جديد: تقسيم الرسالة إذا كانت طويلة
         full_message = header + "".join(report_parts)
         if len(full_message) <= TELEGRAM_MESSAGE_LIMIT:
             context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=full_message, parse_mode=ParseMode.MARKDOWN)
         else:
-            context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=header + report_parts[0], parse_mode=ParseMode.MARKDOWN)
-            for part in report_parts[1:]:
-                await asyncio.sleep(0.5)
-                context.bot.send_message(chat_id=chat_id, text=part, parse_mode=ParseMode.MARKDOWN)
+            context.bot.delete_message(chat_id=chat_id, message_id=sent_message.message_id)
+            for part in (header + p for p in "".join(report_parts).split("---")):
+                 if part.strip():
+                     await asyncio.sleep(0.5)
+                     context.bot.send_message(chat_id=chat_id, text="---"+part if "إطار" in part or "ملخص" in part else part, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
         logger.error(f"Error in full technical analysis for {symbol}: {e}", exc_info=True)
@@ -918,7 +937,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v16.2 - Robust TA) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v16.3 - Smart TA) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
