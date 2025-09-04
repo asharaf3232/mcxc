@@ -592,7 +592,7 @@ def start_command(update: Update, context: CallbackContext):
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
-        "✅ **بوت التداول الذكي (v20.0 - Final Review) جاهز!**\n\n"
+        "✅ **بوت التداول الذكي (v22.0 - The Complete Analyst) جاهز!**\n\n"
         "**🚀 الميزات الكاملة:**\n"
         "- **🎯 فحص احترافي:** يفلتر السوق بحثاً عن أفضل فرص المضاربة.\n"
         "- **🔭 وحدة القناص:** ترصد وتطلق تنبيهات الاختراق لحظة حدوثها.\n"
@@ -690,7 +690,7 @@ def handle_text_message(update: Update, context: CallbackContext):
     if button_text == BTN_MOMENTUM: task = run_momentum_detector(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_WHALE_RADAR: task = run_whale_radar_scan(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_PRO_SCAN: task = run_pro_scan(context, chat_id, sent_message.message_id, client)
-    elif button_text == BTN_PERFORMANCE: task = get_performance_report(context, chat_id, sent_message.message_id, client)
+    elif button_text == BTN_PERFORMANCE: task = get_performance_report(context, chat_id, sent_message.message_id)
     elif button_text == BTN_TOP_GAINERS: task = run_top_gainers(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_TOP_LOSERS: task = run_top_losers(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_TOP_VOLUME: task = run_top_volume(context, chat_id, sent_message.message_id, client)
@@ -1239,7 +1239,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot_data):
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v20.0 - Final Review) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v22.0 - The Complete Analyst) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
