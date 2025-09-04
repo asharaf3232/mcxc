@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import asyncio
+import sqlite3
 import json
 import logging
 import aiohttp
@@ -9,6 +10,7 @@ import numpy as np
 from datetime import datetime, timedelta, UTC
 from collections import deque
 from telegram import Bot, ParseMode, ReplyKeyboardMarkup, Update
+from telegram.error import Forbidden, BadRequest
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
 # =============================================================================
@@ -17,7 +19,7 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, Callb
 
 # --- Telegram Configuration ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
+DATABASE_FILE = "users.db" # اسم ملف قاعدة البيانات
 
 # --- Exchange API Keys ---
 BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
@@ -86,6 +88,69 @@ known_symbols = {p: set() for p in PLATFORMS}
 background_tasks = {}
 recently_alerted_fomo = {p: {} for p in PLATFORMS}
 sniper_watchlist = {p: {} for p in PLATFORMS}
+
+
+# =============================================================================
+# --- [تحديث] قسم إدارة المستخدمين (باستخدام SQLite) ---
+# =============================================================================
+def setup_database():
+    """إنشاء قاعدة البيانات والجدول إذا لم يكونا موجودين"""
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE IF NOT EXISTS users (chat_id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    logger.info("Database is set up and ready.")
+
+def load_user_ids():
+    """تحميل قائمة معرفات المستخدمين من قاعدة البيانات"""
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT chat_id FROM users")
+    # تحويل قائمة الـ tuples إلى set من الأرقام
+    user_ids = {row[0] for row in cursor.fetchall()}
+    conn.close()
+    return user_ids
+
+def save_user_id(chat_id):
+    """حفظ معرف مستخدم جديد في قاعدة البيانات"""
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+    # INSERT OR IGNORE يتجاهل الأمر إذا كان المستخدم موجوداً بالفعل
+    cursor.execute("INSERT OR IGNORE INTO users (chat_id) VALUES (?)", (chat_id,))
+    conn.commit()
+    conn.close()
+    logger.info(f"User with chat_id: {chat_id} has been saved or already exists.")
+
+def remove_user_id(chat_id):
+    """إزالة معرف مستخدم من قاعدة البيانات"""
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM users WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+    logger.warning(f"User {chat_id} has been removed from the database.")
+
+def broadcast_message(message_text: str, parse_mode=ParseMode.MARKDOWN):
+    """إرسال رسالة إلى جميع المستخدمين المسجلين"""
+    user_ids = load_user_ids()
+    if not user_ids:
+        logger.warning("Broadcast requested, but no users are registered.")
+        return
+        
+    for user_id in user_ids:
+        try:
+            bot.send_message(chat_id=user_id, text=message_text, parse_mode=parse_mode)
+        except Forbidden:
+            # المستخدم قام بحظر البوت
+            remove_user_id(user_id)
+        except BadRequest as e:
+            # خطأ آخر مثل chat not found
+            logger.error(f"Failed to send message to {user_id}: {e}")
+            if "chat not found" in str(e):
+                remove_user_id(user_id)
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while sending to {user_id}: {e}")
 
 # =============================================================================
 # --- قسم الشبكة والوظائف الأساسية (مشتركة) ---
@@ -589,6 +654,9 @@ def build_menu(context: CallbackContext):
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def start_command(update: Update, context: CallbackContext):
+    if update.message:
+        save_user_id(update.message.chat_id)
+
     context.user_data['exchange'] = 'mexc'
     context.bot_data.setdefault('background_tasks_enabled', True)
     welcome_message = (
@@ -619,16 +687,19 @@ def toggle_background_tasks(update: Update, context: CallbackContext):
 
 def status_command(update: Update, context: CallbackContext):
     tasks_enabled = context.bot_data.get('background_tasks_enabled', True)
-    message = "📊 **حالة البوت** 📊\n\n"
-    message += f"**1. المهام الخلفية:** {'🟢 نشطة' if tasks_enabled else '🔴 متوقفة'}\n\n"
+    registered_users = len(load_user_ids())
+    message = f"📊 **حالة البوت** 📊\n\n"
+    message += f"**- المستخدمون المسجلون:** `{registered_users}`\n"
+    message += f"**- المهام الخلفية:** {'🟢 نشطة' if tasks_enabled else '🔴 متوقفة'}\n\n"
+    
     for platform in PLATFORMS:
         hunts_count = len(active_hunts.get(platform, {}))
         perf_count = len(performance_tracker.get(platform, {}))
         sniper_count = len(sniper_watchlist.get(platform, {}))
         message += f"**منصة {platform}:**\n"
-        message += f"   - 🎯 الصفقات المراقبة: {hunts_count}\n"
-        message += f"   - 📈 الأداء المتتبع: {perf_count}\n"
-        message += f"   - 🔭 أهداف القناص: {sniper_count}\n\n"
+        message += f"    - 🎯 الصفقات المراقبة: {hunts_count}\n"
+        message += f"    - 📈 الأداء المتتبع: {perf_count}\n"
+        message += f"    - 🔭 أهداف القناص: {sniper_count}\n\n"
     update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
 def handle_text_message(update: Update, context: CallbackContext):
@@ -700,8 +771,6 @@ def handle_text_message(update: Update, context: CallbackContext):
     elif button_text == BTN_TOP_GAINERS: task = run_top_gainers(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_TOP_LOSERS: task = run_top_losers(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_TOP_VOLUME: task = run_top_volume(context, chat_id, sent_message.message_id, client)
-    elif button_text == BTN_CROSS_ANALYSIS: task = run_cross_analysis(context, chat_id, sent_message.message_id, client)
-
 
     if task: asyncio.run_coroutine_threadsafe(task, loop)
 
@@ -888,7 +957,7 @@ async def run_pro_scan(context, chat_id, message_id, client: BaseExchangeClient)
         sorted_ops = sorted(final_opportunities, key=lambda x: x['price_change'], reverse=True)
         message = f"🎯 **أفضل الفرص المفلترة ({client.name})** 🎯\n\n"
         for i, coin in enumerate(sorted_ops[:5]):
-            message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n   - السعر: `${format_price(coin['current_price'])}`\n   - **زخم 30د:** `%{coin['price_change']:+.2f}`\n   - **الحالة:** زخم عالٍ + نشاط حيتان + زخم لحظي مؤكد.\n\n")
+            message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n    - السعر: `${format_price(coin['current_price'])}`\n    - **زخم 30د:** `%{coin['price_change']:+.2f}`\n    - **الحالة:** زخم عالٍ + نشاط حيتان + زخم لحظي مؤكد.\n\n")
         message += "*(فرص عالية الجودة للمراقبة الفورية)*"
         await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
@@ -907,7 +976,7 @@ async def run_momentum_detector(context, chat_id, message_id, client: BaseExchan
     sorted_coins = sorted(momentum_coins_data.values(), key=lambda x: x['price_change'], reverse=True)
     message = f"🚀 **تقرير الزخم ({client.name}) - {datetime.now().strftime('%H:%M:%S')}** 🚀\n\n"
     for i, coin in enumerate(sorted_coins[:10]):
-        message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n   - السعر: `${format_price(coin['current_price'])}`\n   - **زخم آخر 30 دقيقة: `%{coin['price_change']:+.2f}`**\n\n")
+        message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n    - السعر: `${format_price(coin['current_price'])}`\n    - **زخم آخر 30 دقيقة: `%{coin['price_change']:+.2f}`**\n\n")
     message += "*(تمت إضافة هذه العملات إلى متتبع الأداء.)*"
     await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
     now = datetime.now(UTC)
@@ -926,10 +995,10 @@ async def run_whale_radar_scan(context, chat_id, message_id, client: BaseExchang
     message = f"🐋 **تقرير رادار الحيتان ({client.name}) - {datetime.now().strftime('%H:%M:%S')}** 🐋\n\n"
     for signal in sorted_signals:
         symbol_name = signal['symbol'].replace('USDT', '')
-        if signal['type'] == 'Buy Wall': message += (f"🟢 **حائط شراء ضخم على ${symbol_name}**\n   - **الحجم:** `${signal['value']:,.0f}` USDT\n   - **عند سعر:** `{format_price(signal['price'])}`\n\n")
-        elif signal['type'] == 'Sell Wall': message += (f"🔴 **حائط بيع ضخم على ${symbol_name}**\n   - **الحجم:** `${signal['value']:,.0f}` USDT\n   - **عند سعر:** `{format_price(signal['price'])}`\n\n")
-        elif signal['type'] == 'Buy Pressure': message += (f"📈 **ضغط شراء عالٍ على ${symbol_name}**\n   - **النسبة:** الشراء يفوق البيع بـ `{signal['value']:.1f}x`\n\n")
-        elif signal['type'] == 'Sell Pressure': message += (f"📉 **ضغط بيع عالٍ على ${symbol_name}**\n   - **النسبة:** البيع يفوق الشراء بـ `{signal['value']:.1f}x`\n\n")
+        if signal['type'] == 'Buy Wall': message += (f"🟢 **حائط شراء ضخم على ${symbol_name}**\n    - **الحجم:** `${signal['value']:,.0f}` USDT\n    - **عند سعر:** `{format_price(signal['price'])}`\n\n")
+        elif signal['type'] == 'Sell Wall': message += (f"🔴 **حائط بيع ضخم على ${symbol_name}**\n    - **الحجم:** `${signal['value']:,.0f}` USDT\n    - **عند سعر:** `{format_price(signal['price'])}`\n\n")
+        elif signal['type'] == 'Buy Pressure': message += (f"📈 **ضغط شراء عالٍ على ${symbol_name}**\n    - **النسبة:** الشراء يفوق البيع بـ `{signal['value']:.1f}x`\n\n")
+        elif signal['type'] == 'Sell Pressure': message += (f"📉 **ضغط بيع عالٍ على ${symbol_name}**\n    - **النسبة:** البيع يفوق الشراء بـ `{signal['value']:.1f}x`\n\n")
     await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
 async def run_cross_analysis(context, chat_id, message_id, client: BaseExchangeClient):
@@ -947,10 +1016,10 @@ async def run_cross_analysis(context, chat_id, message_id, client: BaseExchangeC
             momentum_details = momentum_coins_data[symbol]
             whale_signals = whale_signals_by_symbol[symbol]
             message += f"💎 **${symbol.replace('USDT', '')}** 💎\n"
-            message += f"   - **الزخم:** `%{momentum_details['price_change']:+.2f}` في آخر 30 دقيقة.\n"
+            message += f"    - **الزخم:** `%{momentum_details['price_change']:+.2f}` في آخر 30 دقيقة.\n"
             whale_info_parts = [f"حائط شراء ({s['value']:,.0f} USDT)" for s in whale_signals if s['type'] == 'Buy Wall'] + [f"ضغط شراء ({s['value']:.1f}x)" for s in whale_signals if s['type'] == 'Buy Pressure']
-            if whale_info_parts: message += f"   - **الحيتان:** " + ", ".join(whale_info_parts) + ".\n\n"
-            else: message += f"   - **الحيتان:** تم رصد نشاط.\n\n"
+            if whale_info_parts: message += f"    - **الحيتان:** " + ", ".join(whale_info_parts) + ".\n\n"
+            else: message += f"    - **الحيتان:** تم رصد نشاط.\n\n"
         message += "*(إشارات عالية الجودة تتطلب تحليلك الخاص)*"
         await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
@@ -979,9 +1048,9 @@ async def get_performance_report(context, chat_id, message_id):
             minutes, _ = divmod(remainder, 60)
             time_str = f"{int(hours)} س و {int(minutes)} د"
             message += (f"{emoji} **${symbol.replace('USDT','')}** ({data.get('exchange', 'N/A')}) (منذ {time_str})\n"
-                        f"   - سعر التنبيه: `${format_price(alert_price)}`\n"
-                        f"   - السعر الحالي: `${format_price(current_price)}` (**{current_change:+.2f}%**)\n"
-                        f"   - أعلى سعر: `${format_price(high_price)}` (**{peak_change:+.2f}%**)\n\n")
+                            f"    - سعر التنبيه: `${format_price(alert_price)}`\n"
+                            f"    - السعر الحالي: `${format_price(current_price)}` (**{current_change:+.2f}%**)\n"
+                            f"    - أعلى سعر: `${format_price(high_price)}` (**{peak_change:+.2f}%**)\n\n")
         await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Error in get_performance_report: {e}", exc_info=True)
@@ -1040,7 +1109,7 @@ async def show_sniper_watchlist(update: Update, context: CallbackContext):
                 message += (f"- `${symbol.replace('USDT','')}` (نطاق: "
                             f"`{format_price(data['low'])}` - `{format_price(data['high'])}`)\n")
             if len(watchlist) > 5:
-                message += f"   *... و {len(watchlist) - 5} عملات أخرى.*\n"
+                message += f"    *... و {len(watchlist) - 5} عملات أخرى.*\n"
             message += "\n"
     
     if not any_watched:
@@ -1082,8 +1151,10 @@ async def fomo_hunter_loop(client: BaseExchangeClient, bot_data):
             sorted_coins = sorted(new_alerts, key=lambda x: x['price_change'], reverse=True)
             message = f"🚨 **تنبيه تلقائي من صياد الفومو ({client.name})** 🚨\n\n"
             for i, coin in enumerate(sorted_coins[:5]):
-                message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n   - السعر: `${format_price(coin['current_price'])}`\n   - **زخم آخر 30 دقيقة: `%{coin['price_change']:+.2f}`**\n\n")
-            bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+                message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n    - السعر: `${format_price(coin['current_price'])}`\n    - **زخم آخر 30 دقيقة: `%{coin['price_change']:+.2f}`**\n\n")
+            
+            broadcast_message(message)
+
             for coin in sorted_coins[:5]:
                 add_to_monitoring(coin['symbol'], float(coin['current_price']), coin.get('peak_volume', 0), now, f"صياد الفومو ({client.name})", client.name)
         except Exception as e:
@@ -1112,7 +1183,7 @@ async def new_listings_sniper_loop(client: BaseExchangeClient, bot_data):
                 for symbol in newly_listed:
                     logger.info(f"Sniper ({client.name}): NEW LISTING DETECTED: {symbol}")
                     message = f"🎯 **إدراج جديد على {client.name}:** `${symbol}`"
-                    bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+                    broadcast_message(message)
                 known_symbols[client.name].update(newly_listed)
         except Exception as e:
             logger.error(f"An unexpected error in new_listings_sniper_loop for {client.name}: {e}")
@@ -1150,10 +1221,10 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
                             price_drop_percent = ((current_price - high_price) / high_price) * 100
                             if price_drop_percent <= MOMENTUM_LOSS_THRESHOLD_PERCENT:
                                 message = (f"⚠️ **تنبيه: فقدان الزخم لعملة ${symbol.replace('USDT','')}** ({platform})\n\n"
-                                           f"   - أعلى سعر: `${format_price(high_price)}`\n"
-                                           f"   - السعر الحالي: `${format_price(current_price)}`\n"
-                                           f"   - **الهبوط من القمة: `{price_drop_percent:.2f}%`**")
-                                bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+                                           f"    - أعلى سعر: `${format_price(high_price)}`\n"
+                                           f"    - السعر الحالي: `${format_price(current_price)}`\n"
+                                           f"    - **الهبوط من القمة: `{price_drop_percent:.2f}%`**")
+                                broadcast_message(message)
                                 tracker['momentum_lost_alerted'] = True
                                 logger.info(f"MOMENTUM LOSS ALERT sent for {symbol} on {platform}")
                 except Exception as e:
@@ -1229,7 +1300,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot_data):
                         f"**سعر الاختراق:** `{format_price(current_price)}`\n\n"
                         f"*(إشارة عالية الدقة، لحظة الانطلاق المحتملة)*"
                     )
-                    bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+                    broadcast_message(message)
                     logger.info(f"SNIPER TRIGGER ({client.name}): Breakout detected for {symbol}!")
                     
                     if symbol in sniper_watchlist[client.name]:
@@ -1238,22 +1309,25 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot_data):
             except Exception as e:
                  logger.error(f"Error in breakout_trigger_loop for {symbol} on {client.name}: {e}", exc_info=True)
                  if symbol in sniper_watchlist[client.name]:
-                        del sniper_watchlist[client.name][symbol]
+                     del sniper_watchlist[client.name][symbol]
 
 # =============================================================================
 # --- 6. تشغيل البوت ---
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v22.0 - The Complete Analyst) متصل الآن!**\n\nأرسل /start لعرض القائمة."
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
-        logger.info("Startup message sent successfully.")
+        message = "✅ **بوت الصياد الذكي (v22.0 - The Complete Analyst) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        broadcast_message(message)
+        logger.info("Startup message sent successfully to all users.")
     except Exception as e:
         logger.error(f"Failed to send startup message: {e}")
 
 async def main():
-    if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN or 'YOUR_TELEGRAM' in TELEGRAM_CHAT_ID:
-        logger.critical("FATAL ERROR: Bot token or chat ID are not set."); return
+    if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN:
+        logger.critical("FATAL ERROR: Bot token is not set."); return
+    
+    # [إضافة] تهيئة قاعدة البيانات عند بدء التشغيل
+    setup_database()
         
     async with aiohttp.ClientSession() as session:
         updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
