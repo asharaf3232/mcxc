@@ -53,7 +53,7 @@ TA_KLINE_LIMIT = 200
 TA_MIN_KLINE_COUNT = 50
 FIBONACCI_PERIOD = 90
 SCALP_KLINE_LIMIT = 50
-PRO_SCAN_MIN_SCALP_SCORE = 2 # !جديد: الحد الأدنى لنتيجة التحليل السريع في الفحص الاحترافي
+PRO_SCAN_MIN_SCALP_SCORE = 3 # !تعديل: تم ضبط الحد الأدنى لنتيجة الفحص الاحترافي
 
 # --- إعدادات عامة ---
 HTTP_TIMEOUT = 15
@@ -137,7 +137,7 @@ class MexcClient(BaseExchangeClient):
     async def get_market_data(self):
         data = await fetch_json(self.session, f"{self.base_api_url}/api/v3/ticker/24hr")
         if not data: return []
-        return [{'symbol': i['symbol'], 'quoteVolume': i.get('quoteVolume','0'), 'lastPrice': i.get('lastPrice','0'), 'priceChangePercent': float(i.get('priceChangePercent','0'))*100} for i in data if i.get('symbol','').endswith("USDT")]
+        return [{'symbol': i['symbol'], 'quoteVolume': i.get('quoteVolume') or '0', 'lastPrice': i.get('lastPrice') or '0', 'priceChangePercent': float(i.get('priceChangePercent','0'))*100} for i in data if i.get('symbol','').endswith("USDT")]
 
     async def get_klines(self, symbol, interval, limit):
         api_interval = self.interval_map.get(interval, interval)
@@ -167,7 +167,7 @@ class GateioClient(BaseExchangeClient):
     async def get_market_data(self):
         data = await fetch_json(self.session, f"{self.base_api_url}/spot/tickers")
         if not data: return []
-        return [{'symbol': i['currency_pair'].replace('_',''), 'quoteVolume': i.get('quote_volume','0'), 'lastPrice': i.get('last','0'), 'priceChangePercent': float(i.get('change_percentage','0'))} for i in data if i.get('currency_pair','').endswith("_USDT")]
+        return [{'symbol': i['currency_pair'].replace('_',''), 'quoteVolume': i.get('quote_volume') or '0', 'lastPrice': i.get('last') or '0', 'priceChangePercent': float(i.get('change_percentage','0'))} for i in data if i.get('currency_pair','').endswith("_USDT")]
     
     async def get_klines(self, symbol, interval, limit):
         gateio_symbol = f"{symbol[:-4]}_{symbol[-4:]}"
@@ -201,7 +201,7 @@ class BinanceClient(BaseExchangeClient):
     async def get_market_data(self):
         data = await fetch_json(self.session, f"{self.base_api_url}/api/v3/ticker/24hr")
         if not data: return []
-        return [{'symbol': i['symbol'], 'quoteVolume': i.get('quoteVolume','0'), 'lastPrice': i.get('lastPrice','0'), 'priceChangePercent': float(i.get('priceChangePercent','0'))} for i in data if i.get('symbol','').endswith("USDT")]
+        return [{'symbol': i['symbol'], 'quoteVolume': i.get('quoteVolume') or '0', 'lastPrice': i.get('lastPrice') or '0', 'priceChangePercent': float(i.get('priceChangePercent','0'))} for i in data if i.get('symbol','').endswith("USDT")]
     
     async def get_klines(self, symbol, interval, limit):
         api_interval = self.interval_map.get(interval, interval)
@@ -231,7 +231,7 @@ class BybitClient(BaseExchangeClient):
     async def get_market_data(self):
         data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/tickers", params={'category': 'spot'})
         if not data or not data.get('result') or not data['result'].get('list'): return []
-        return [{'symbol': i['symbol'], 'quoteVolume': i.get('turnover24h','0'), 'lastPrice': i.get('lastPrice','0'), 'priceChangePercent': float(i.get('price24hPcnt','0'))*100} for i in data['result']['list'] if i['symbol'].endswith("USDT")]
+        return [{'symbol': i['symbol'], 'quoteVolume': i.get('turnover24h') or '0', 'lastPrice': i.get('lastPrice') or '0', 'priceChangePercent': float(i.get('price24hPcnt','0'))*100} for i in data['result']['list'] if i['symbol'].endswith("USDT")]
     
     async def get_klines(self, symbol, interval, limit):
         async with api_semaphore:
@@ -265,7 +265,7 @@ class KucoinClient(BaseExchangeClient):
     async def get_market_data(self):
         data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/allTickers")
         if not data or not data.get('data') or not data['data'].get('ticker'): return []
-        return [{'symbol': i['symbol'].replace('-',''), 'quoteVolume': i.get('volValue','0'), 'lastPrice': i.get('last','0'), 'priceChangePercent': float(i.get('changeRate','0'))*100} for i in data['data']['ticker'] if i.get('symbol','').endswith("-USDT")]
+        return [{'symbol': i['symbol'].replace('-',''), 'quoteVolume': i.get('volValue') or '0', 'lastPrice': i.get('last') or '0', 'priceChangePercent': float(i.get('changeRate','0'))*100} for i in data['data']['ticker'] if i.get('symbol','').endswith("-USDT")]
     
     async def get_klines(self, symbol, interval, limit):
         kucoin_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
@@ -304,9 +304,9 @@ class OkxClient(BaseExchangeClient):
         for i in data['data']:
             if i.get('instId','').endswith("-USDT"):
                 try:
-                    lp, op = float(i.get('last','0')), float(i.get('open24h','0'))
+                    lp, op = float(i.get('last') or '0'), float(i.get('open24h') or '0')
                     cp = ((lp-op)/op)*100 if op > 0 else 0.0
-                    results.append({'symbol': i['instId'].replace('-',''), 'quoteVolume': i.get('volCcy24h','0'), 'lastPrice': i.get('last','0'), 'priceChangePercent': cp})
+                    results.append({'symbol': i['instId'].replace('-',''), 'quoteVolume': i.get('volCcy24h') or '0', 'lastPrice': i.get('last') or '0', 'priceChangePercent': cp})
                 except (ValueError, TypeError): continue
         return results
     
@@ -508,6 +508,30 @@ async def analyze_order_book_for_whales(book, symbol):
     except Exception as e:
         logger.warning(f"Could not analyze order book for {symbol}: {e}")
     return signals
+
+async def helper_get_scalp_score(client: BaseExchangeClient, symbol: str) -> int:
+    """!جديد: وظيفة مساعدة لحساب نتيجة التحليل السريع."""
+    overall_score = 0
+    timeframes = {'15m': 2, '5m': 1} 
+
+    for tf_interval, weight in timeframes.items():
+        klines = await client.get_processed_klines(symbol, tf_interval, SCALP_KLINE_LIMIT)
+        if not klines or len(klines) < 20: continue
+
+        volumes = np.array([float(k[5]) for k in klines])
+        close_prices = np.array([float(k[4]) for k in klines])
+        
+        avg_volume = np.mean(volumes[-20:-1])
+        last_volume = volumes[-1]
+        
+        if avg_volume > 0 and last_volume > avg_volume * 1.5:
+            overall_score += 1 * weight
+
+        if len(close_prices) >= 5:
+            price_change_5_candles = ((close_prices[-1] - close_prices[-5]) / close_prices[-5]) * 100 if close_prices[-5] > 0 else 0
+            if price_change_5_candles > 2.0:
+                 overall_score += 1 * weight
+    return overall_score
 
 # =============================================================================
 # --- 4. الوظائف التفاعلية (أوامر البوت) ---
@@ -814,7 +838,6 @@ async def run_scalp_analysis(update: Update, context: CallbackContext):
         logger.error(f"Error in scalp analysis for {symbol}: {e}", exc_info=True)
         await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ فادح أثناء تحليل {symbol}.")
 
-# !جديد: وظيفة الفحص الاحترافي
 async def run_pro_scan(context, chat_id, message_id, client: BaseExchangeClient):
     initial_text = f"🎯 **الفحص الاحترافي ({client.name})**\n\n🔍 جارِ دمج وفلترة جميع الإشارات... هذه العملية قد تستغرق دقيقة."
     try: await asyncio.to_thread(context.bot.edit_message_text, chat_id=chat_id, message_id=message_id, text=initial_text)
@@ -832,15 +855,8 @@ async def run_pro_scan(context, chat_id, message_id, client: BaseExchangeClient)
         
         final_opportunities = []
         for symbol in strong_symbols:
-            # إجراء تحليل سريع داخلي
-            overall_score = 0
-            klines_15m = await client.get_processed_klines(symbol, '15m', SCALP_KLINE_LIMIT)
-            if klines_15m and len(klines_15m) >= 20:
-                volumes = np.array([float(k[5]) for k in klines_15m])
-                avg_volume = np.mean(volumes[-20:-1])
-                if avg_volume > 0 and volumes[-1] > avg_volume * 1.5: overall_score += 1
-            
-            if overall_score >= PRO_SCAN_MIN_SCALP_SCORE:
+            scalp_score = await helper_get_scalp_score(client, symbol)
+            if scalp_score >= PRO_SCAN_MIN_SCALP_SCORE:
                  final_opportunities.append(momentum_coins[symbol])
 
         if not final_opportunities:
@@ -1106,7 +1122,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession):
 # =============================================================================
 def send_startup_message():
     try:
-        message = "✅ **بوت التداول الذكي (v18.0 - Scalp Analyst) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت التداول الذكي (v19.0 - Pro Scan) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info("Startup message sent successfully.")
     except Exception as e:
