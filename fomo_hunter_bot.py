@@ -252,6 +252,8 @@ active_hunts = {p: {} for p in PLATFORMS}
 known_symbols = {p: set() for p in PLATFORMS}
 recently_alerted_fomo = {p: {} for p in PLATFORMS}
 sniper_watchlist = {p: {} for p in PLATFORMS}
+# --- الإضافة الجديدة: متتبع نتائج القناص ---
+sniper_tracker = {p: {} for p in PLATFORMS}
 
 
 # =============================================================================
@@ -906,10 +908,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hunts_count = len(active_hunts.get(platform, {}))
         perf_count = len(performance_tracker.get(platform, {}))
         sniper_count = len(sniper_watchlist.get(platform, {}))
+        sniper_tracked_count = len(sniper_tracker.get(platform, {}))
         message += f"**منصة {platform}:**\n"
         message += f"    - 🎯 الصفقات المراقبة: {hunts_count}\n"
         message += f"    - 📈 الأداء المتتبع: {perf_count}\n"
-        message += f"    - 🔭 أهداف القناص: {sniper_count}\n\n"
+        message += f"    - 🔭 أهداف القناص: {sniper_count}\n"
+        message += f"    - 🔫 نتائج القناص: {sniper_tracked_count}\n\n"
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1400,6 +1404,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession, bot: Bot):
         await asyncio.sleep(RUN_PERFORMANCE_TRACKER_EVERY_MINUTES * 60)
         now = datetime.now(UTC)
         for platform in PLATFORMS:
+            # --- تتبع الأداء العام ---
             for symbol, data in list(performance_tracker[platform].items()):
                 if now - data['alert_time'] > timedelta(hours=PERFORMANCE_TRACKING_DURATION_HOURS):
                     if performance_tracker[platform].get(symbol):
@@ -1435,6 +1440,47 @@ async def performance_tracker_loop(session: aiohttp.ClientSession, bot: Bot):
                                 logger.info(f"MOMENTUM LOSS ALERT sent for {symbol} on {platform}")
                 except Exception as e:
                     logger.error(f"Error updating price for {symbol} on {platform}: {e}")
+
+            # --- الإضافة الجديدة: تتبع نتائج القناص ---
+            for symbol, data in list(sniper_tracker[platform].items()):
+                if data['status'] != 'Tracking': continue
+                
+                if now - data['alert_time'] > timedelta(hours=PERFORMANCE_TRACKING_DURATION_HOURS):
+                    if sniper_tracker[platform].get(symbol):
+                        del sniper_tracker[platform][symbol]
+                    continue
+                
+                try:
+                    client = get_exchange_client(platform, session)
+                    if not client: continue
+                    current_price = await client.get_current_price(symbol)
+                    if not current_price: continue
+
+                    # التحقق من النجاح
+                    if current_price >= data['target_price']:
+                        success_message = (
+                            f"✅ **القناص: نجاح!** ✅\n\n"
+                            f"**العملة:** `${symbol.replace('USDT', '')}` ({platform})\n"
+                            f"**النتيجة:** وصلت إلى الهدف المحدد عند `{format_price(data['target_price'])}` بنجاح."
+                        )
+                        await broadcast_message(bot, success_message)
+                        logger.info(f"SNIPER TRACKER ({platform}): {symbol} SUCCEEDED.")
+                        del sniper_tracker[platform][symbol]
+
+                    # التحقق من الفشل
+                    elif current_price <= data['invalidation_price']:
+                        failure_message = (
+                            f"❌ **القناص: فشل.** ❌\n\n"
+                            f"**العملة:** `${symbol.replace('USDT', '')}` ({platform})\n"
+                            f"**النتيجة:** فشل الاختراق وعاد السعر تحت نقطة الإبطال عند `{format_price(data['invalidation_price'])}`."
+                        )
+                        await broadcast_message(bot, failure_message)
+                        logger.info(f"SNIPER TRACKER ({platform}): {symbol} FAILED.")
+                        del sniper_tracker[platform][symbol]
+
+                except Exception as e:
+                     logger.error(f"Error in Sniper Tracker for {symbol} on {platform}: {e}")
+
 
 async def coiled_spring_radar_loop(client: BaseExchangeClient, bot_data: dict):
     if not client: return
@@ -1534,6 +1580,15 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
                     )
                     await broadcast_message(bot, message)
                     logger.info(f"SNIPER TRIGGER ({client.name}): Confirmed breakout for {symbol} above POC!")
+                    
+                    # --- الإضافة الجديدة: بدء تتبع نتيجة الإشارة ---
+                    sniper_tracker[client.name][symbol] = {
+                        'alert_time': datetime.now(UTC),
+                        'target_price': target_price,
+                        'invalidation_price': invalidation_price,
+                        'status': 'Tracking' 
+                    }
+                    logger.info(f"SNIPER TRACKER ({client.name}): Started tracking breakout for {symbol}.")
 
                     if symbol in sniper_watchlist[client.name]:
                         del sniper_watchlist[client.name][symbol]
@@ -1548,7 +1603,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
 # =============================================================================
 async def send_startup_message(bot: Bot):
     try:
-        message = "✅ **بوت الصياد الذكي (v23.2 - قناص البروفايل الحجمي) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت الصياد الذكي (v23.3 - متتبع القناص) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         await broadcast_message(bot, message)
         logger.info("Startup message sent successfully to all users.")
     except Exception as e:
