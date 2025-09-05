@@ -20,6 +20,11 @@ from telegram.ext import (
     ContextTypes,
 )
 
+# --- START: Gemini AI Integration ---
+# أدخل مفتاح Gemini API الخاص بك هنا
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'YOUR_GEMINI_API_KEY') 
+# --- END: Gemini AI Integration ---
+
 # =============================================================================
 # --- 🔬 وحدة التحليل الفني المحسّنة (Analysis Module) 🔬 ---
 # =============================================================================
@@ -330,6 +335,48 @@ def format_price(price_str):
             return f"{price:.10f}".rstrip('0')
         return f"{price:.8g}"
     except (ValueError, TypeError): return price_str
+
+# --- START: Gemini AI Integration ---
+async def call_gemini_api(session: aiohttp.ClientSession, prompt: str):
+    """
+    وظيفة مساعدة لإرسال طلب إلى Google Gemini API والحصول على استجابة نصية.
+    """
+    if not GEMINI_API_KEY or 'YOUR_GEMINI_API_KEY' in GEMINI_API_KEY:
+        logger.error("Gemini API key is not configured.")
+        return "خطأ: مفتاح Gemini API غير مهيأ. يرجى إضافته."
+
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+    
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
+    headers = {'Content-Type': 'application/json'}
+
+    try:
+        async with session.post(api_url, json=payload, headers=headers, timeout=30) as response:
+            response.raise_for_status()
+            result = await response.json()
+            
+            # استخلاص النص من الاستجابة المعقدة
+            if 'candidates' in result and len(result['candidates']) > 0:
+                content = result['candidates'][0].get('content', {})
+                if 'parts' in content and len(content['parts']) > 0:
+                    return content['parts'][0].get('text', "لم يتمكن الذكاء الاصطناعي من تقديم إجابة.")
+            
+            logger.warning(f"Gemini API response structure is unexpected: {result}")
+            return "حدث خطأ في استلام رد من الذكاء الاصطناعي."
+
+    except aiohttp.ClientResponseError as e:
+        logger.error(f"HTTP Error calling Gemini API: {e.status} - {e.message}")
+        return f"خطأ في الاتصال بخدمة الذكاء الاصطناعي: {e.status}"
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while calling Gemini API: {e}", exc_info=True)
+        return "حدث خطأ فادح أثناء التواصل مع الذكاء الاصطناعي."
+
+# --- END: Gemini AI Integration ---
 
 # =============================================================================
 # --- ⚙️ قسم عملاء المنصات (Exchange Clients) ⚙️ ---
@@ -931,7 +978,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not symbol.endswith("USDT"): symbol += "USDT"
         context.user_data['awaiting_symbol_for_ta'] = False
         context.args = [symbol]
-        await run_full_technical_analysis(update, context)
+        # --- START: Gemini AI Integration ---
+        # استدعاء الوظيفة الجديدة التي تستخدم الذكاء الاصطناعي
+        await run_full_technical_analysis_with_ai(update, context)
+        # --- END: Gemini AI Integration ---
         return
 
     if context.user_data.get('awaiting_symbol_for_scalp'):
@@ -1013,71 +1063,91 @@ async def send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, te
         await context.bot.send_message(chat_id=chat_id, text=part, **kwargs)
         await asyncio.sleep(0.5)
 
-async def run_full_technical_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- START: Gemini AI Integration ---
+async def run_full_technical_analysis_with_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     symbol = context.args[0]
 
     current_exchange = context.user_data.get('exchange', 'mexc')
     client = get_exchange_client(current_exchange, context.application.bot_data['session'])
 
-    sent_message = await context.bot.send_message(chat_id=chat_id, text=f"🔬 جارِ إجراء تحليل فني شامل لـ ${symbol} على {client.name}...")
+    sent_message = await context.bot.send_message(chat_id=chat_id, text=f"🔬 جارِ إجراء تحليل فني شامل لـ ${symbol} بواسطة المحلل الذكي...")
 
     try:
         timeframes = {'يومي': '1d', '4 ساعات': '4h', 'ساعة': '1h'}
-        tf_weights = {'يومي': 3, '4 ساعات': 2, 'ساعة': 1}
         report_parts = []
+        analysis_data_for_ai = {'symbol': symbol, 'exchange': client.name, 'timeframes': {}}
+        
         header = f"📊 **التحليل الفني المفصل لـ ${symbol}** ({client.name})\n_{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_\n\n"
-        overall_score = 0
 
         for tf_name, tf_interval in timeframes.items():
             klines = await client.get_processed_klines(symbol, tf_interval, TA_KLINE_LIMIT)
             tf_report = f"--- **إطار {tf_name}** ---\n"
-
+            
             if not klines or len(klines) < TA_MIN_KLINE_COUNT:
-                tf_report += "لا توجد بيانات كافية للتحليل.\n\n"; report_parts.append(tf_report); continue
+                tf_report += "لا توجد بيانات كافية للتحليل.\n\n"
+                report_parts.append(tf_report)
+                continue
 
             close_prices = np.array([float(k[4]) for k in klines[-TA_KLINE_LIMIT:]])
             high_prices = np.array([float(k[2]) for k in klines[-TA_KLINE_LIMIT:]])
             low_prices = np.array([float(k[3]) for k in klines[-TA_KLINE_LIMIT:]])
             current_price = close_prices[-1]
             report_lines = []
-            weight = tf_weights[tf_name]
+
+            # جمع البيانات للذكاء الاصطناعي
+            tf_data_for_ai = {'current_price': current_price}
 
             ema21, ema50, sma100 = calculate_ema(close_prices, 21), calculate_ema(close_prices, 50), calculate_sma(close_prices, 100)
             trend_text, trend_score = analyze_trend(current_price, ema21, ema50, sma100)
-            report_lines.append(f"**الاتجاه:** {trend_text}"); overall_score += trend_score * weight
+            report_lines.append(f"**الاتجاه:** {trend_text}")
+            tf_data_for_ai['trend'] = trend_text
 
             macd_line, signal_line = calculate_macd(close_prices)
             if macd_line is not None and signal_line is not None:
-                if macd_line > signal_line: report_lines.append(f"🟢 **MACD:** إيجابي."); overall_score += 1 * weight
-                else: report_lines.append(f"🔴 **MACD:** سلبي."); overall_score -= 1 * weight
+                macd_status = "إيجابي" if macd_line > signal_line else "سلبي"
+                report_lines.append(f"{'🟢' if macd_status == 'إيجابي' else '🔴'} **MACD:** {macd_status}.")
+                tf_data_for_ai['macd'] = macd_status
 
             rsi = calculate_rsi(close_prices)
             if rsi:
-                if rsi > 70: report_lines.append(f"🔴 **RSI ({rsi:.1f}):** تشبع شرائي."); overall_score -= 1 * weight
-                elif rsi < 30: report_lines.append(f"🟢 **RSI ({rsi:.1f}):** تشبع بيعي."); overall_score += 1 * weight
-                else: report_lines.append(f"🟡 **RSI ({rsi:.1f}):** محايد.")
+                rsi_status = "تشبع شرائي" if rsi > 70 else "تشبع بيعي" if rsi < 30 else "محايد"
+                report_lines.append(f"{'🔴' if rsi_status == 'تشبع شرائي' else '🟢' if rsi_status == 'تشبع بيعي' else '🟡'} **RSI ({rsi:.1f}):** {rsi_status}.")
+                tf_data_for_ai['rsi'] = f"{rsi:.1f} ({rsi_status})"
 
             supports, resistances = find_support_resistance(high_prices, low_prices)
             next_res = min([r for r in resistances if r > current_price], default=None)
-            if next_res: report_lines.append(f"🛡️ **أقرب مقاومة:** {format_price(next_res)}")
+            if next_res:
+                report_lines.append(f"🛡️ **أقرب مقاومة:** {format_price(next_res)}")
+                tf_data_for_ai['next_resistance'] = next_res
+            
             next_sup = max([s for s in supports if s < current_price], default=None)
-            if next_sup: report_lines.append(f"💰 **أقرب دعم:** {format_price(next_sup)}")
-            else: report_lines.append("💰 **أقرب دعم:** لا يوجد دعم واضح أدناه.")
+            if next_sup:
+                report_lines.append(f"💰 **أقرب دعم:** {format_price(next_sup)}")
+                tf_data_for_ai['next_support'] = next_sup
 
-            fib_levels = calculate_fibonacci_retracement(high_prices, low_prices)
-            if fib_levels:
-                report_lines.append(f"🎚️ **فيبوناتشي:** 0.5: `{format_price(fib_levels['level_0.5'])}` | 0.618: `{format_price(fib_levels['level_0.618'])}`")
+            analysis_data_for_ai['timeframes'][tf_name] = tf_data_for_ai
 
             tf_report += "\n".join(report_lines) + f"\n*السعر الحالي: {format_price(current_price)}*\n\n"
             report_parts.append(tf_report)
 
-        summary_report = "--- **ملخص التحليل الذكي** ---\n"
-        if overall_score >= 5: summary_report += f"🟢 **التحليل العام يميل للإيجابية بقوة (النقاط: {overall_score}).**"
-        elif overall_score > 0: summary_report += f"🟢 **التحليل العام يميل للإيجابية (النقاط: {overall_score}).**"
-        elif overall_score <= -5: summary_report += f"🔴 **التحليل العام يميل للسلبية بقوة (النقاط: {overall_score}).**"
-        elif overall_score < 0: summary_report += f"🔴 **التحليل العام يميل للسلبية (النقاط: {overall_score}).**"
-        else: summary_report += f"🟡 **السوق في حيرة، الإشارات متضاربة (النقاط: {overall_score}).**"
+        # --- صياغة الطلب للذكاء الاصطناعي ---
+        prompt = (
+            "أنت خبير ومحلل فني محترف في سوق العملات الرقمية. مهمتك هي تحليل البيانات الفنية التالية لعملة معينة وتقديم خلاصة تحليلية موجزة وذكية للمتداولين.\n\n"
+            "البيانات:\n"
+            f"{json.dumps(analysis_data_for_ai, indent=2, ensure_ascii=False)}\n\n"
+            "المطلوب:\n"
+            "1. قدم فقرة قصيرة كـ 'ملخص تحليلي' تربط فيها بين الإشارات المختلفة على الأطر الزمنية المتعددة.\n"
+            "2. استنتج هل الوضع العام يميل للإيجابية، السلبية، أم الحيادية.\n"
+            "3. اذكر أهم نقطة يجب على المتداول الانتباه إليها الآن (مثال: اقتراب السعر من مقاومة قوية، أو ظهور دايفرجنس، أو تشبع بيعي على فريم كبير).\n"
+            "اجعل تحليلك واضحاً ومباشراً وبدون مصطلحات معقدة جداً."
+        )
+        
+        # استدعاء Gemini API
+        session = context.application.bot_data['session']
+        ai_summary = await call_gemini_api(session, prompt)
+
+        summary_report = f"--- **🧠 ملخص المحلل الذكي** ---\n{ai_summary}\n\n"
         report_parts.append(summary_report)
 
         await context.bot.delete_message(chat_id=chat_id, message_id=sent_message.message_id)
@@ -1085,8 +1155,9 @@ async def run_full_technical_analysis(update: Update, context: ContextTypes.DEFA
         await send_long_message(context, chat_id, full_message, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
-        logger.error(f"Error in full technical analysis for {symbol}: {e}", exc_info=True)
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ فادح أثناء تحليل {symbol}.")
+        logger.error(f"Error in full technical analysis with AI for {symbol}: {e}", exc_info=True)
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ فادح أثناء تحليل {symbol} بواسطة الذكاء الاصطناعي.")
+# --- END: Gemini AI Integration ---
 
 async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
@@ -1779,7 +1850,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
 # =============================================================================
 async def send_startup_message(bot: Bot):
     try:
-        message = "✅ **بوت الصياد الذكي (v29.0 - زخم مطوّر) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت الصياد الذكي (v30.0 - مدعوم بالذكاء الاصطناعي) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         await broadcast_message(bot, message)
         logger.info("Startup message sent successfully to all users.")
     except Exception as e:
@@ -1811,6 +1882,9 @@ def main() -> None:
     if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN:
         logger.critical("FATAL ERROR: Bot token is not set.")
         return
+    if 'YOUR_GEMINI' in GEMINI_API_KEY:
+        logger.warning("GEMINI API KEY is not set. AI features will be disabled.")
+
 
     setup_database()
 
