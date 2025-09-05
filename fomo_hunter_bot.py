@@ -21,7 +21,6 @@ from telegram.ext import (
 )
 
 # --- START: Gemini AI Integration ---
-# أدخل مفتاح Gemini API الخاص بك هنا
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'YOUR_GEMINI_API_KEY') 
 # --- END: Gemini AI Integration ---
 
@@ -345,7 +344,8 @@ async def call_gemini_api(session: aiohttp.ClientSession, prompt: str):
         logger.error("Gemini API key is not configured.")
         return "خطأ: مفتاح Gemini API غير مهيأ. يرجى إضافته."
 
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+    # --- FIX: Updated model name from 'gemini-pro' to 'gemini-1.0-pro' ---
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.0-pro:generateContent?key={GEMINI_API_KEY}"
     
     payload = {
         "contents": [{
@@ -360,7 +360,6 @@ async def call_gemini_api(session: aiohttp.ClientSession, prompt: str):
             response.raise_for_status()
             result = await response.json()
             
-            # استخلاص النص من الاستجابة المعقدة
             if 'candidates' in result and len(result['candidates']) > 0:
                 content = result['candidates'][0].get('content', {})
                 if 'parts' in content and len(content['parts']) > 0:
@@ -371,6 +370,7 @@ async def call_gemini_api(session: aiohttp.ClientSession, prompt: str):
 
     except aiohttp.ClientResponseError as e:
         logger.error(f"HTTP Error calling Gemini API: {e.status} - {e.message}")
+        # Return the actual error code to the user for better debugging
         return f"خطأ في الاتصال بخدمة الذكاء الاصطناعي: {e.status}"
     except Exception as e:
         logger.error(f"An unexpected error occurred while calling Gemini API: {e}", exc_info=True)
@@ -978,10 +978,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not symbol.endswith("USDT"): symbol += "USDT"
         context.user_data['awaiting_symbol_for_ta'] = False
         context.args = [symbol]
-        # --- START: Gemini AI Integration ---
-        # استدعاء الوظيفة الجديدة التي تستخدم الذكاء الاصطناعي
         await run_full_technical_analysis_with_ai(update, context)
-        # --- END: Gemini AI Integration ---
         return
 
     if context.user_data.get('awaiting_symbol_for_scalp'):
@@ -1063,7 +1060,6 @@ async def send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, te
         await context.bot.send_message(chat_id=chat_id, text=part, **kwargs)
         await asyncio.sleep(0.5)
 
-# --- START: Gemini AI Integration ---
 async def run_full_technical_analysis_with_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     symbol = context.args[0]
@@ -1095,13 +1091,12 @@ async def run_full_technical_analysis_with_ai(update: Update, context: ContextTy
             current_price = close_prices[-1]
             report_lines = []
 
-            # جمع البيانات للذكاء الاصطناعي
             tf_data_for_ai = {'current_price': current_price}
 
             ema21, ema50, sma100 = calculate_ema(close_prices, 21), calculate_ema(close_prices, 50), calculate_sma(close_prices, 100)
             trend_text, trend_score = analyze_trend(current_price, ema21, ema50, sma100)
             report_lines.append(f"**الاتجاه:** {trend_text}")
-            tf_data_for_ai['trend'] = trend_text
+            tf_data_for_ai['trend'] = trend_text.split('.')[0] # Get the core trend text
 
             macd_line, signal_line = calculate_macd(close_prices)
             if macd_line is not None and signal_line is not None:
@@ -1119,31 +1114,29 @@ async def run_full_technical_analysis_with_ai(update: Update, context: ContextTy
             next_res = min([r for r in resistances if r > current_price], default=None)
             if next_res:
                 report_lines.append(f"🛡️ **أقرب مقاومة:** {format_price(next_res)}")
-                tf_data_for_ai['next_resistance'] = next_res
+                tf_data_for_ai['next_resistance'] = format_price(next_res)
             
             next_sup = max([s for s in supports if s < current_price], default=None)
             if next_sup:
                 report_lines.append(f"💰 **أقرب دعم:** {format_price(next_sup)}")
-                tf_data_for_ai['next_support'] = next_sup
+                tf_data_for_ai['next_support'] = format_price(next_sup)
 
             analysis_data_for_ai['timeframes'][tf_name] = tf_data_for_ai
 
             tf_report += "\n".join(report_lines) + f"\n*السعر الحالي: {format_price(current_price)}*\n\n"
             report_parts.append(tf_report)
-
-        # --- صياغة الطلب للذكاء الاصطناعي ---
+            
         prompt = (
-            "أنت خبير ومحلل فني محترف في سوق العملات الرقمية. مهمتك هي تحليل البيانات الفنية التالية لعملة معينة وتقديم خلاصة تحليلية موجزة وذكية للمتداولين.\n\n"
-            "البيانات:\n"
+            "You are a professional technical analyst for the cryptocurrency market. Your task is to analyze the following technical data for a specific coin and provide a concise, intelligent summary for traders. Analyze in Arabic.\n\n"
+            "Data:\n"
             f"{json.dumps(analysis_data_for_ai, indent=2, ensure_ascii=False)}\n\n"
-            "المطلوب:\n"
-            "1. قدم فقرة قصيرة كـ 'ملخص تحليلي' تربط فيها بين الإشارات المختلفة على الأطر الزمنية المتعددة.\n"
-            "2. استنتج هل الوضع العام يميل للإيجابية، السلبية، أم الحيادية.\n"
-            "3. اذكر أهم نقطة يجب على المتداول الانتباه إليها الآن (مثال: اقتراب السعر من مقاومة قوية، أو ظهور دايفرجنس، أو تشبع بيعي على فريم كبير).\n"
-            "اجعل تحليلك واضحاً ومباشراً وبدون مصطلحات معقدة جداً."
+            "Required Analysis (in Arabic):\n"
+            "1. Provide a short paragraph as an 'analytical summary' that connects the different signals across the multiple timeframes.\n"
+            "2. Conclude whether the overall situation is bullish, bearish, or neutral.\n"
+            "3. Mention the most important point a trader should pay attention to right now (e.g., price approaching strong resistance, divergence appearing, or oversold on a large frame).\n"
+            "Keep your analysis clear, direct, and avoid overly complex jargon."
         )
         
-        # استدعاء Gemini API
         session = context.application.bot_data['session']
         ai_summary = await call_gemini_api(session, prompt)
 
@@ -1157,7 +1150,6 @@ async def run_full_technical_analysis_with_ai(update: Update, context: ContextTy
     except Exception as e:
         logger.error(f"Error in full technical analysis with AI for {symbol}: {e}", exc_info=True)
         await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ فادح أثناء تحليل {symbol} بواسطة الذكاء الاصطناعي.")
-# --- END: Gemini AI Integration ---
 
 async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
@@ -1850,7 +1842,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
 # =============================================================================
 async def send_startup_message(bot: Bot):
     try:
-        message = "✅ **بوت الصياد الذكي (v30.0 - مدعوم بالذكاء الاصطناعي) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت الصياد الذكي (v30.1 - إصلاح API) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         await broadcast_message(bot, message)
         logger.info("Startup message sent successfully to all users.")
     except Exception as e:
