@@ -864,7 +864,6 @@ BTN_SELECT_KUCOIN = "KuCoin"
 BTN_SELECT_OKX = "OKX"
 BTN_TASKS_ON = "🔴 إيقاف المهام"
 BTN_TASKS_OFF = "🟢 تفعيل المهام"
-# --- 🗑️ تم حذف زر "عن البوت" بناءً على الطلب ---
 
 def build_menu(context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
@@ -882,9 +881,10 @@ def build_menu(context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [BTN_PRO_SCAN, BTN_MOMENTUM, BTN_WHALE_RADAR],
-        [BTN_TA_PRO, BTN_GEM_HUNTER, BTN_SNIPER_LIST],
+        [BTN_TA_PRO, BTN_SCALP_SCAN],
+        [BTN_GEM_HUNTER, BTN_SNIPER_LIST],
         [BTN_TOP_GAINERS, BTN_TOP_VOLUME, BTN_TOP_LOSERS],
-        [BTN_PERFORMANCE, BTN_STATUS], # <-- تم حذف زر "عن البوت"
+        [BTN_PERFORMANCE, BTN_STATUS],
         [toggle_tasks_btn],
         [mexc_btn, gate_btn, binance_btn],
         [bybit_btn, kucoin_btn, okx_btn]
@@ -922,8 +922,6 @@ async def toggle_background_tasks(update: Update, context: ContextTypes.DEFAULT_
     context.bot_data['background_tasks_enabled'] = not tasks_enabled
     status = "تفعيل" if not tasks_enabled else "إيقاف"
     await update.message.reply_text(f"✅ تم **{status}** المهام الخلفية.", reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
-
-# --- 🗑️ تم حذف دالة "about_command" بالكامل ---
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tasks_enabled = context.bot_data.get('background_tasks_enabled', True)
@@ -982,8 +980,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if button_text == BTN_SNIPER_LIST:
         await show_sniper_watchlist(update, context)
         return
-
-    # --- 🗑️ تم حذف معالج زر "عن البوت" ---
 
     if button_text in [BTN_SELECT_MEXC, BTN_SELECT_GATEIO, BTN_SELECT_BINANCE, BTN_SELECT_BYBIT, BTN_SELECT_KUCOIN, BTN_SELECT_OKX]:
         exchange_name = button_text
