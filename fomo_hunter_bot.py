@@ -588,6 +588,46 @@ def get_exchange_client(exchange_name, session):
 # =============================================================================
 # --- 🔬 قسم التحليل الفني (TA Section) 🔬 ---
 # =============================================================================
+def calculate_poc(klines, num_bins=50):
+    """
+    يحسب نقطة التحكم (POC) من بيانات الشموع.
+    POC هو مستوى السعر الذي حظي بأعلى حجم تداول.
+    """
+    if not klines or len(klines) < 10:
+        return None
+
+    try:
+        high_prices = np.array([float(k[2]) for k in klines])
+        low_prices = np.array([float(k[3]) for k in klines])
+        volumes = np.array([float(k[5]) for k in klines])
+
+        min_price = np.min(low_prices)
+        max_price = np.max(high_prices)
+
+        if max_price == min_price:
+            return min_price
+
+        price_bins = np.linspace(min_price, max_price, num_bins)
+        volume_per_bin = np.zeros(num_bins)
+
+        # توزيع حجم التداول على مستويات الأسعار
+        for i in range(len(klines)):
+            # نستخدم متوسط السعر للتقريب
+            avg_price = (high_prices[i] + low_prices[i]) / 2
+            bin_index = np.searchsorted(price_bins, avg_price) -1
+            if 0 <= bin_index < num_bins:
+                volume_per_bin[bin_index] += volumes[i]
+        
+        # العثور على البين ذو الحجم الأعلى
+        if np.sum(volume_per_bin) == 0: return None # لا يوجد حجم تداول
+        poc_index = np.argmax(volume_per_bin)
+        poc_price = price_bins[poc_index]
+        
+        return poc_price
+    except Exception as e:
+        logger.error(f"Error calculating POC: {e}")
+        return None
+
 def calculate_ema_series(prices, period):
     if len(prices) < period: return []
     ema = []
@@ -1273,8 +1313,9 @@ async def show_sniper_watchlist(update: Update, context: ContextTypes.DEFAULT_TY
             any_watched = True
             message += f"--- **{platform}** ---\n"
             for symbol, data in list(watchlist.items())[:5]:
+                poc_str = f", POC: `{format_price(data['poc'])}`" if 'poc' in data else ""
                 message += (f"- `${symbol.replace('USDT','')}` (نطاق: "
-                            f"`{format_price(data['low'])}` - `{format_price(data['high'])}`)\n")
+                            f"`{format_price(data['low'])}` - `{format_price(data['high'])}`{poc_str})\n")
             if len(watchlist) > 5:
                 message += f"    *... و {len(watchlist) - 5} عملات أخرى.*\n"
             message += "\n"
@@ -1423,13 +1464,18 @@ async def coiled_spring_radar_loop(client: BaseExchangeClient, bot_data: dict):
                 volatility = ((highest_high - lowest_low) / lowest_low) * 100
 
                 if volatility <= SNIPER_MAX_VOLATILITY_PERCENT:
+                    # --- الإضافة الجديدة: حساب وحفظ نقطة التحكم ---
+                    poc = calculate_poc(klines)
+                    if not poc: return # لا يمكن المتابعة بدون POC
+
                     avg_volume = np.mean(volumes)
                     if symbol not in sniper_watchlist[client.name]:
                         sniper_watchlist[client.name][symbol] = {
                             'high': highest_high, 'low': lowest_low,
+                            'poc': poc, # حفظ نقطة التحكم
                             'avg_volume': avg_volume, 'duration_hours': SNIPER_COMPRESSION_PERIOD_HOURS
                         }
-                        logger.info(f"SNIPER RADAR ({client.name}): Added {symbol} to watchlist. Volatility: {volatility:.2f}%")
+                        logger.info(f"SNIPER RADAR ({client.name}): Added {symbol} to watchlist. POC: {poc:.8g}, Volatility: {volatility:.2f}%")
 
             tasks = [check_candidate(p['symbol']) for p in candidates]
             await asyncio.gather(*tasks)
@@ -1455,6 +1501,10 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
                 current_price = float(klines[-1][4])
                 current_volume = float(klines[-1][5])
                 
+                # --- الإضافة الجديدة: التحقق من وجود POC واستخدامه ---
+                poc = data.get('poc')
+                if not poc: continue # تخطي إذا لم يتم حساب POC
+
                 # حساب VWAP على إطار 5 دقائق
                 close_prices_5m = [float(k[4]) for k in klines]
                 volumes_5m = [float(k[5]) for k in klines]
@@ -1464,9 +1514,9 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
                 is_breakout_price = current_price > data['high']
                 is_breakout_volume = current_volume > (data['avg_volume'] * SNIPER_BREAKOUT_VOLUME_MULTIPLIER)
                 is_above_vwap = vwap_5m and current_price > vwap_5m
+                is_above_poc = current_price > (poc * 1.005) # الشرط الجديد
 
-                if is_breakout_price and is_breakout_volume and is_above_vwap:
-                    # --- الإضافة الجديدة: حساب خطة المراقبة ---
+                if is_breakout_price and is_breakout_volume and is_above_vwap and is_above_poc:
                     invalidation_price = data['high']
                     range_height = data['high'] - data['low']
                     target_price = data['high'] + range_height
@@ -1476,14 +1526,14 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
                         f"**العملة:** `${symbol.replace('USDT', '')}` ({client.name})\n"
                         f"**النمط:** اختراق نطاق تجميعي استمر لـ {data['duration_hours']} ساعات.\n"
                         f"**سعر الاختراق:** `{format_price(current_price)}`\n"
-                        f"**التأكيد:** السعر فوق VWAP وحجم التداول عالٍ.\n\n"
+                        f"**التأكيد:** السعر فوق VWAP، حجم عالٍ، **وتجاوز نقطة التحكم (`{format_price(poc)}`)**.\n\n"
                         f"📝 **خطة المراقبة:**\n"
                         f"- **يفشل الاختراق بالإغلاق تحت:** `{format_price(invalidation_price)}` (قمة النطاق)\n"
                         f"- **هدف أولي محتمل (نجاح):** `{format_price(target_price)}` (بناءً على ارتفاع النطاق)\n\n"
                         f"*(إشارة عالية الدقة، راقب نقاط الخطة جيداً)*"
                     )
                     await broadcast_message(bot, message)
-                    logger.info(f"SNIPER TRIGGER ({client.name}): Breakout detected for {symbol}!")
+                    logger.info(f"SNIPER TRIGGER ({client.name}): Confirmed breakout for {symbol} above POC!")
 
                     if symbol in sniper_watchlist[client.name]:
                         del sniper_watchlist[client.name][symbol]
@@ -1498,7 +1548,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
 # =============================================================================
 async def send_startup_message(bot: Bot):
     try:
-        message = "✅ **بوت الصياد الذكي (v23.1 - خطة القناص) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت الصياد الذكي (v23.2 - قناص البروفايل الحجمي) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         await broadcast_message(bot, message)
         logger.info("Startup message sent successfully to all users.")
     except Exception as e:
