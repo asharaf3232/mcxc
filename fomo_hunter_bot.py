@@ -22,90 +22,70 @@ from telegram.ext import (
 
 # =============================================================================
 # --- 🔬 وحدة التحليل الفني المحسّنة (Analysis Module) 🔬 ---
-# تم دمج هذا الجزء هنا مباشرة
 # =============================================================================
 
 def calculate_atr(high_prices, low_prices, close_prices, period=14):
     """
-    يحسب مؤشر متوسط النطاق الحقيقي (ATR) لقياس التقلبات.
+    يحسب مؤشر متوسط النطاق الحقيقي (ATR) بصيغته المرجعية.
+    TR = max(H-L, |H-C_prev|, |L-C_prev|)
     """
-    if len(high_prices) < period:
+    if len(close_prices) < period + 1:
         return None
-
+    
     tr_values = []
     for i in range(1, len(high_prices)):
         high = high_prices[i]
         low = low_prices[i]
         prev_close = close_prices[i-1]
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        tr_values.append(tr)
 
-        tr1 = high - low
-        tr2 = abs(high - prev_close)
-        tr3 = abs(low - prev_close)
-
-        true_range = max(tr1, tr2, tr3)
-        tr_values.append(true_range)
-
-    atr = np.mean(tr_values[-period:])
-    return atr
+    return np.mean(tr_values[-period:]) if len(tr_values) >= period else None
 
 def calculate_vwap(close_prices, volumes, period=14):
     """
     يحسب مؤشر متوسط السعر المرجح بالحجم (VWAP).
+    VWAP = Σ(Price * Volume) / Σ(Volume)
     """
     if len(close_prices) < period:
         return None
-
+        
     prices = np.array(close_prices[-period:])
     volumes = np.array(volumes[-period:])
-
+    
     if np.sum(volumes) == 0:
-        return np.mean(prices) # Fallback to SMA if volume is zero
+        return np.mean(prices)
 
     return np.sum(prices * volumes) / np.sum(volumes)
 
 def analyze_momentum_consistency(close_prices, volumes, period=10):
-    """
-    يحلل استمرارية الزخم بدلاً من الاعتماد على قفزة واحدة.
-    - يتأكد من أن 60% من الشموع الأخيرة إيجابية.
-    - يتأكد من أن الحجم يتزايد بشكل عام.
-    """
     if len(close_prices) < period:
-        return 0 # Neutral score
+        return 0
 
     recent_closes = np.array(close_prices[-period:])
     recent_volumes = np.array(volumes[-period:])
-
     price_increases = np.sum(np.diff(recent_closes) > 0)
-
+    
     score = 0
-    # تحقق من استمرارية صعود السعر
     if (price_increases / period) >= 0.6:
         score += 1
 
-    # تحقق من تزايد حجم التداول
-    # نقسم الفترة إلى نصفين ونقارن متوسط الحجم
     half_period = period // 2
     first_half_volume_avg = np.mean(recent_volumes[:half_period])
     second_half_volume_avg = np.mean(recent_volumes[half_period:])
 
     if first_half_volume_avg > 0 and second_half_volume_avg > (first_half_volume_avg * 1.2):
         score += 1
-
+        
     return score
 
 async def calculate_pro_score(client, symbol: str):
-    """
-    الوظيفة التحليلية الجديدة: تحسب نقاطاً للعملة بناءً على معايير متعددة.
-    هذا هو قلب المحرك التحليلي المطور.
-    """
     score = 0
     analysis_details = {}
-
     try:
-        # استخدام إطار زمني متوسط (15 دقيقة) للتحليل الشامل
         klines = await client.get_processed_klines(symbol, '15m', 100)
         if not klines or len(klines) < 50:
-            return 0, {} # لا يمكن التحليل ببيانات غير كافية
+            return 0, {}
 
         close_prices = np.array([float(k[4]) for k in klines])
         high_prices = np.array([float(k[2]) for k in klines])
@@ -113,68 +93,45 @@ async def calculate_pro_score(client, symbol: str):
         volumes = np.array([float(k[5]) for k in klines])
         current_price = close_prices[-1]
 
-        # 1. تحليل الاتجاه العام (نقاط: -2 إلى +2)
+        # 1. Trend Analysis
         ema20 = np.mean(close_prices[-20:])
         ema50 = np.mean(close_prices[-50:])
-        if current_price > ema20 > ema50:
-            score += 2
-            analysis_details['Trend'] = "🟢 Strong Up"
-        elif current_price > ema20:
-            score += 1
-            analysis_details['Trend'] = "🟢 Up"
-        elif current_price < ema20 < ema50:
-            score -= 2
-            analysis_details['Trend'] = "🔴 Strong Down"
-        elif current_price < ema20:
-            score -= 1
-            analysis_details['Trend'] = "🔴 Down"
-        else:
-            analysis_details['Trend'] = "🟡 Sideways"
+        if current_price > ema20 > ema50: score += 2; analysis_details['Trend'] = "🟢 Strong Up"
+        elif current_price > ema20: score += 1; analysis_details['Trend'] = "🟢 Up"
+        elif current_price < ema20 < ema50: score -= 2; analysis_details['Trend'] = "🔴 Strong Down"
+        elif current_price < ema20: score -= 1; analysis_details['Trend'] = "🔴 Down"
+        else: analysis_details['Trend'] = "🟡 Sideways"
 
-        # 2. تحليل الزخم القريب (نقاط: 0 إلى +2)
+        # 2. Momentum
         momentum_score = analyze_momentum_consistency(close_prices, volumes)
         score += momentum_score
         analysis_details['Momentum'] = f"{'🟢' * momentum_score}{'🟡' * (2-momentum_score)} ({momentum_score}/2)"
 
-        # 3. تحليل السيولة والتقلبات (نقاط: -1 إلى +1)
+        # 3. Volatility (ATR)
         atr = calculate_atr(high_prices, low_prices, close_prices)
         if atr:
-            # تقيس التقلبات كنسبة مئوية من السعر الحالي
             volatility_percent = (atr / current_price) * 100 if current_price > 0 else 0
             analysis_details['Volatility'] = f"{volatility_percent:.2f}%"
-            if volatility_percent > 7.0: # تقلبات عالية جداً قد تكون خطيرة
-                score -= 1
-            elif volatility_percent < 1.0: # تقلبات منخفضة جداً (لا توجد فرصة)
-                score -= 1
-            else: # تقلبات صحية
-                score += 1
-
-        # 4. تحليل القوة النسبية (RSI) (نقاط: -1 إلى +1)
-        deltas = np.diff(close_prices)
-        gains = deltas[deltas >= 0]
-        losses = -deltas[deltas < 0]
-        if len(gains) > 0 and len(losses) > 0:
-            avg_gain = np.mean(gains)
-            avg_loss = np.mean(losses)
-            rs = avg_gain / avg_loss
-            rsi = 100 - (100 / (1 + rs))
+            if volatility_percent > 7.0 or volatility_percent < 1.0: score -=1
+            else: score += 1
+        
+        # 4. RSI
+        rsi = calculate_rsi(close_prices)
+        if rsi:
             analysis_details['RSI'] = f"{rsi:.1f}"
-            if rsi > 75: score -= 1 # تشبع شرائي
-            elif rsi < 25: score += 1 # تشبع بيعي
-
-        # 5. تحليل VWAP (نقاط: 0 إلى +2)
+            if rsi > 75: score -= 1
+            elif rsi < 25: score += 1
+            
+        # 5. VWAP
         vwap = calculate_vwap(close_prices, volumes, period=20)
         if vwap:
             analysis_details['VWAP'] = f"{vwap:.8g}"
-            if current_price > vwap * 1.01: # إذا كان السعر أعلى من VWAP بنسبة 1%
-                score += 2 # إشارة قوية جداً على سيطرة المشترين
-            elif current_price > vwap:
-                score += 1
+            if current_price > vwap * 1.01: score += 2
+            elif current_price > vwap: score += 1
 
         analysis_details['Final Score'] = score
         analysis_details['Price'] = f"{current_price:.8g}"
         return score, analysis_details
-
     except Exception as e:
         print(f"Error in pro_score for {symbol}: {e}")
         return 0, {"Error": str(e)}
@@ -185,7 +142,7 @@ async def calculate_pro_score(client, symbol: str):
 
 # --- Telegram Configuration ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
-DATABASE_FILE = "users.db" # اسم ملف قاعدة البيانات
+DATABASE_FILE = "users.db"
 
 # --- Exchange API Keys ---
 BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
@@ -198,6 +155,7 @@ WHALE_GEM_MAX_VOLUME_24H = 5000000
 WHALE_WALL_THRESHOLD_USDT = 25000
 WHALE_PRESSURE_RATIO = 3.0
 WHALE_SCAN_CANDIDATE_LIMIT = 50
+WHALE_OBI_LEVELS = 10 # عدد المستويات لحساب اختلال دفتر الأوامر
 
 # --- إعدادات كاشف الزخم ---
 MOMENTUM_MAX_PRICE = 0.10
@@ -209,17 +167,18 @@ MOMENTUM_KLINE_INTERVAL = '5m'
 MOMENTUM_KLINE_LIMIT = 12
 MOMENTUM_LOSS_THRESHOLD_PERCENT = -5.0
 
-# --- إعدادات وحدة القناص (Sniper Module) ---
+# --- إعدادات وحدة القناص (Sniper Module) v28 ---
 SNIPER_RADAR_RUN_EVERY_MINUTES = 30
 SNIPER_TRIGGER_RUN_EVERY_SECONDS = 60
 SNIPER_COMPRESSION_PERIOD_HOURS = 8
-SNIPER_MAX_VOLATILITY_PERCENT = 8.0
-SNIPER_BREAKOUT_VOLUME_MULTIPLIER = 4.0
+SNIPER_MAX_VOLATILITY_PERCENT = 8.0 # فلتر التقلب المبدئي
+SNIPER_BREAKOUT_VOLUME_MULTIPLIER = 3.5 # مضاعف الحجم المطلوب للاختراق
 SNIPER_MIN_USDT_VOLUME = 200000
-# --- ✨ التحسينات الجديدة للقناص ✨ ---
-SNIPER_MIN_TARGET_PERCENT = 2.5 # 🎯 الحد الأدنى لربح الصفقة المحتمل كنسبة مئوية
-SNIPER_TREND_TIMEFRAME = '1h'   # 📈 الإطار الزمني لتأكيد الاتجاه العام
-SNIPER_TREND_PERIOD = 50       # ⏳ فترة المتوسط المتحرك لتأكيد الاتجاه
+SNIPER_MIN_TARGET_PERCENT = 3.0 # الحد الأدنى لربح الصفقة المحتمل
+SNIPER_TREND_TIMEFRAME = '1h'
+SNIPER_TREND_PERIOD = 50
+SNIPER_OBI_THRESHOLD = 0.15 # عتبة اختلال دفتر الأوامر لتأكيد الشراء
+SNIPER_ATR_STOP_MULTIPLIER = 2.0 # مضاعف ATR لوضع وقف الخسارة
 
 # --- إعدادات صائد الجواهر (Gem Hunter Settings) ---
 GEM_MIN_CORRECTION_PERCENT = -70.0
@@ -239,8 +198,6 @@ TA_KLINE_LIMIT = 200
 TA_MIN_KLINE_COUNT = 50
 FIBONACCI_PERIOD = 90
 SCALP_KLINE_LIMIT = 50
-PRO_SCAN_MIN_SCALP_SCORE = 3
-# الحد الأدنى من النقاط لإظهار العملة في الفحص الاحترافي
 PRO_SCAN_MIN_SCORE = 5 
 
 # --- إعدادات عامة ---
@@ -262,20 +219,15 @@ active_hunts = {p: {} for p in PLATFORMS}
 known_symbols = {p: set() for p in PLATFORMS}
 recently_alerted_fomo = {p: {} for p in PLATFORMS}
 sniper_watchlist = {p: {} for p in PLATFORMS}
-# --- ✨ فلتر العملات المستبعدة للقناص ✨ ---
 SNIPER_EXCLUDED_SUBSTRINGS = ['USD', 'DAI', 'TUSD', 'BUSD']
 def is_excluded_symbol(symbol: str) -> bool:
-    """يفحص إذا كانت العملة من العملات المستبعدة (مستقرة أو رافعة مالية)."""
-    # استبعاد العملات التي تنتهي بـ 3L, 3S, 5L, 5S إلخ.
     if len(symbol) > 2 and symbol[-1] in 'LS' and symbol[-2].isdigit():
         return True
-    # استبعاد العملات التي تحتوي على أسماء العملات المستقرة
     for sub in SNIPER_EXCLUDED_SUBSTRINGS:
         if sub in symbol:
             return True
     return False
 
-# --- الإضافة الجديدة: متتبع نتائج القناص ---
 sniper_tracker = {p: {} for p in PLATFORMS}
 
 
@@ -611,52 +563,33 @@ def get_exchange_client(exchange_name, session):
     return client_class(session) if client_class else None
 
 # =============================================================================
-# --- 🔬 قسم التحليل الفني (TA Section) 🔬 ---
+# --- 🔬 قسم التحليل الفني والكمي (Quantitative & TA Section) 🔬 ---
 # =============================================================================
 def calculate_poc(klines, num_bins=50):
-    """
-    يحسب نقطة التحكم (POC) من بيانات الشموع.
-    POC هو مستوى السعر الذي حظي بأعلى حجم تداول.
-    """
-    if not klines or len(klines) < 10:
-        return None
-
+    if not klines or len(klines) < 10: return None
     try:
         high_prices = np.array([float(k[2]) for k in klines])
         low_prices = np.array([float(k[3]) for k in klines])
         volumes = np.array([float(k[5]) for k in klines])
-
-        min_price = np.min(low_prices)
-        max_price = np.max(high_prices)
-
-        if max_price == min_price:
-            return min_price
-
+        min_price, max_price = np.min(low_prices), np.max(high_prices)
+        if max_price == min_price: return min_price
         price_bins = np.linspace(min_price, max_price, num_bins)
         volume_per_bin = np.zeros(num_bins)
-
-        # توزيع حجم التداول على مستويات الأسعار
         for i in range(len(klines)):
-            # نستخدم متوسط السعر للتقريب
             avg_price = (high_prices[i] + low_prices[i]) / 2
             bin_index = np.searchsorted(price_bins, avg_price) -1
             if 0 <= bin_index < num_bins:
                 volume_per_bin[bin_index] += volumes[i]
-
-        # العثور على البين ذو الحجم الأعلى
-        if np.sum(volume_per_bin) == 0: return None # لا يوجد حجم تداول
+        if np.sum(volume_per_bin) == 0: return None
         poc_index = np.argmax(volume_per_bin)
-        poc_price = price_bins[poc_index]
-
-        return poc_price
+        return price_bins[poc_index]
     except Exception as e:
         logger.error(f"Error calculating POC: {e}")
         return None
 
 def calculate_ema_series(prices, period):
     if len(prices) < period: return []
-    ema = []
-    sma = sum(prices[:period]) / period
+    ema, sma = [], sum(prices[:period]) / period
     ema.append(sma)
     multiplier = 2 / (period + 1)
     for price in prices[period:]:
@@ -675,25 +608,26 @@ def calculate_macd(prices, fast_period=12, slow_period=26, signal_period=9):
     if len(prices) < slow_period: return None, None
     ema_fast = calculate_ema_series(prices, fast_period)
     ema_slow = calculate_ema_series(prices, slow_period)
-
     if not ema_fast or not ema_slow: return None, None
     ema_fast = ema_fast[len(ema_fast) - len(ema_slow):]
-
     macd_line_series = np.array(ema_fast) - np.array(ema_slow)
     signal_line_series = calculate_ema_series(macd_line_series.tolist(), signal_period)
-
     if not signal_line_series: return None, None
     return macd_line_series[-1], signal_line_series[-1]
 
 def calculate_rsi(prices, period=14):
+    """
+    يحسب مؤشر القوة النسبية (RSI) بصيغته المرجعية.
+    RS = AvgU / AvgD
+    """
     if len(prices) < period + 1: return None
     deltas = np.diff(prices)
     gains = deltas[deltas >= 0]
     losses = -deltas[deltas < 0]
-    if len(gains) == 0: avg_gain = 0
-    else: avg_gain = np.mean(gains)
-    if len(losses) == 0: avg_loss = 1e-10
-    else: avg_loss = np.mean(losses)
+    if len(gains) == 0: return 0
+    if len(losses) == 0: return 100
+    avg_gain = np.mean(gains)
+    avg_loss = np.mean(losses)
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
@@ -706,46 +640,54 @@ def calculate_bollinger_bands(prices, period=20, num_std_dev=2):
     lower_band = middle_band - (std_dev * num_std_dev)
     return upper_band, middle_band, lower_band
 
+def bollinger_bandwidth(prices, period=20):
+    """يحسب عرض نطاق بولنجر كنسبة مئوية لقياس ضغط التقلب."""
+    bands = calculate_bollinger_bands(prices, period)
+    if not all(bands): return None
+    upper, middle, lower = bands
+    return ((upper - lower) / middle) * 100 if middle > 0 else None
+
 def find_support_resistance(high_prices, low_prices, window=10):
     supports, resistances = [], []
     for i in range(window, len(high_prices) - window):
-        if high_prices[i] == max(high_prices[i-window:i+window+1]):
-            resistances.append(high_prices[i])
-        if low_prices[i] == min(low_prices[i-window:i+window+1]):
-            supports.append(low_prices[i])
+        if high_prices[i] == max(high_prices[i-window:i+window+1]): resistances.append(high_prices[i])
+        if low_prices[i] == min(low_prices[i-window:i+window+1]): supports.append(low_prices[i])
     return sorted(list(set(supports)), reverse=True), sorted(list(set(resistances)), reverse=True)
 
 def calculate_fibonacci_retracement(high_prices, low_prices, period=FIBONACCI_PERIOD):
     if len(high_prices) < period:
-        recent_highs = high_prices
-        recent_lows = low_prices
+        recent_highs, recent_lows = high_prices, low_prices
     else:
-        recent_highs = high_prices[-period:]
-        recent_lows = low_prices[-period:]
-
-    max_price = np.max(recent_highs)
-    min_price = np.min(recent_lows)
+        recent_highs, recent_lows = high_prices[-period:], low_prices[-period:]
+    max_price, min_price = np.max(recent_highs), np.min(recent_lows)
     difference = max_price - min_price
     if difference == 0: return {}
-
-    levels = {
+    return {
         'level_0.382': max_price - (difference * 0.382),
         'level_0.5': max_price - (difference * 0.5),
         'level_0.618': max_price - (difference * 0.618),
     }
-    return levels
 
 def analyze_trend(current_price, ema21, ema50, sma100):
     if ema21 and ema50 and sma100:
-        if current_price > ema21 > ema50 > sma100:
-            return "🟢 اتجاه صاعد قوي.", 2
-        if current_price > ema50 and current_price > ema21:
-            return "🟢 اتجاه صاعد.", 1
-        if current_price < ema21 < ema50 < sma100:
-            return "🔴 اتجاه هابط قوي.", -2
-        if current_price < ema50 and current_price < ema21:
-             return "🔴 اتجاه هابط.", -1
+        if current_price > ema21 > ema50 > sma100: return "🟢 اتجاه صاعد قوي.", 2
+        if current_price > ema50 and current_price > ema21: return "🟢 اتجاه صاعد.", 1
+        if current_price < ema21 < ema50 < sma100: return "🔴 اتجاه هابط قوي.", -2
+        if current_price < ema50 and current_price < ema21: return "🔴 اتجاه هابط.", -1
     return "🟡 جانبي / غير واضح.", 0
+
+def order_book_imbalance(bids, asks, top_n=10):
+    """
+    يحسب مؤشر اختلال دفتر الأوامر (OBI) بناءً على القيمة النقدية.
+    OBI = (ΣBidsValue - ΣAsksValue) / (ΣBidsValue + ΣAsksValue)
+    """
+    try:
+        b = sum(float(p) * float(q) for p, q in bids[:top_n])
+        a = sum(float(p) * float(q) for p, q in asks[:top_n])
+        denom = (b + a)
+        return (b - a) / denom if denom > 0 else 0.0
+    except (ValueError, TypeError):
+        return 0.0
 
 # =============================================================================
 # --- الوظائف المساعدة للتحليل ---
@@ -779,67 +721,50 @@ async def helper_get_whale_activity(client: BaseExchangeClient):
     if not market_data: return {}
     potential_gems = [p for p in market_data if float(p.get('lastPrice','999')) <= WHALE_GEM_MAX_PRICE and WHALE_GEM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= WHALE_GEM_MAX_VOLUME_24H]
     if not potential_gems: return {}
+    
     for p in potential_gems: p['change_float'] = p.get('priceChangePercent', 0)
     top_gems = sorted(potential_gems, key=lambda x: x['change_float'], reverse=True)[:WHALE_SCAN_CANDIDATE_LIMIT]
-    tasks = [client.get_order_book(p['symbol']) for p in top_gems]
+    
+    tasks = [client.get_order_book(p['symbol'], WHALE_OBI_LEVELS) for p in top_gems]
     all_order_books = await asyncio.gather(*tasks)
+    
     whale_signals_by_symbol = {}
     for i, book in enumerate(all_order_books):
         symbol = top_gems[i]['symbol']
         signals = await analyze_order_book_for_whales(book, symbol)
         if signals:
             if symbol not in whale_signals_by_symbol: whale_signals_by_symbol[symbol] = []
-            for signal in signals:
-                signal['symbol'] = symbol
-                whale_signals_by_symbol[symbol].append(signal)
+            whale_signals_by_symbol[symbol].extend(signals)
     return whale_signals_by_symbol
 
 async def analyze_order_book_for_whales(book, symbol):
     signals = []
     if not book or not book.get('bids') or not book.get('asks'): return signals
     try:
-        bids = sorted([(float(item[0]), float(item[1])) for item in book['bids'] if len(item) >= 2], key=lambda x: x[0], reverse=True)
-        asks = sorted([(float(item[0]), float(item[1])) for item in book['asks'] if len(item) >= 2], key=lambda x: x[0])
+        bids = [(float(p), float(q)) for p, q in book['bids'] if len(p)>0 and len(q)>0]
+        asks = [(float(p), float(q)) for p, q in book['asks'] if len(p)>0 and len(q)>0]
+
+        # 1. Wall Detection
         for price, qty in bids[:5]:
             value = price * qty
             if value >= WHALE_WALL_THRESHOLD_USDT:
-                signals.append({'type': 'Buy Wall', 'value': value, 'price': price}); break
+                signals.append({'type': 'Buy Wall', 'symbol': symbol, 'value': value, 'price': price}); break
         for price, qty in asks[:5]:
             value = price * qty
             if value >= WHALE_WALL_THRESHOLD_USDT:
-                signals.append({'type': 'Sell Wall', 'value': value, 'price': price}); break
-        bids_value = sum(p * q for p, q in bids[:10])
-        asks_value = sum(p * q for p, q in asks[:10])
-        if asks_value > 0 and (bids_value / asks_value) >= WHALE_PRESSURE_RATIO:
-            signals.append({'type': 'Buy Pressure', 'value': bids_value / asks_value})
-        elif bids_value > 0 and (asks_value / bids_value) >= WHALE_PRESSURE_RATIO:
-            signals.append({'type': 'Sell Pressure', 'value': asks_value / bids_value})
+                signals.append({'type': 'Sell Wall', 'symbol': symbol, 'value': value, 'price': price}); break
+        
+        # 2. Order Book Imbalance (OBI)
+        obi = order_book_imbalance(bids, asks, WHALE_OBI_LEVELS)
+        if obi > SNIPER_OBI_THRESHOLD: # Using sniper threshold as a general guide
+            signals.append({'type': 'Buy Pressure', 'symbol': symbol, 'value': obi})
+        elif obi < -SNIPER_OBI_THRESHOLD:
+             signals.append({'type': 'Sell Pressure', 'symbol': symbol, 'value': obi})
+
     except Exception as e:
         logger.warning(f"Could not analyze order book for {symbol}: {e}")
     return signals
 
-async def helper_get_scalp_score(client: BaseExchangeClient, symbol: str) -> int:
-    overall_score = 0
-    timeframes = {'15m': 2, '5m': 1} 
-
-    for tf_interval, weight in timeframes.items():
-        klines = await client.get_processed_klines(symbol, tf_interval, SCALP_KLINE_LIMIT)
-        if not klines or len(klines) < 20: continue
-
-        volumes = np.array([float(k[5]) for k in klines])
-        close_prices = np.array([float(k[4]) for k in klines])
-
-        avg_volume = np.mean(volumes[-20:-1])
-        last_volume = volumes[-1]
-
-        if avg_volume > 0 and last_volume > avg_volume * 1.5:
-            overall_score += 1 * weight
-
-        if len(close_prices) >= 5:
-            price_change_5_candles = ((close_prices[-1] - close_prices[-5]) / close_prices[-5]) * 100 if close_prices[-5] > 0 else 0
-            if price_change_5_candles > 2.0:
-                 overall_score += 1 * weight
-    return overall_score
 
 # =============================================================================
 # --- 4. الوظائف التفاعلية (أوامر البوت) ---
@@ -1250,15 +1175,20 @@ async def run_whale_radar_scan(context, chat_id, message_id, client: BaseExchang
     whale_signals_by_symbol = await helper_get_whale_activity(client)
     if not whale_signals_by_symbol:
         await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **فحص الرادار على {client.name} اكتمل:** لا يوجد نشاط حيتان واضح."); return
-    all_signals = [signal for signals_list in whale_signals_by_symbol.values() for signal in signals_list]
-    sorted_signals = sorted(all_signals, key=lambda x: x.get('value', 0), reverse=True)
+    
     message = f"🐋 **تقرير رادار الحيتان ({client.name}) - {datetime.now().strftime('%H:%M:%S')}** 🐋\n\n"
-    for signal in sorted_signals:
-        symbol_name = signal['symbol'].replace('USDT', '')
-        if signal['type'] == 'Buy Wall': message += (f"🟢 **حائط شراء ضخم على ${symbol_name}**\n    - **الحجم:** `${signal['value']:,.0f}` USDT\n    - **عند سعر:** `{format_price(signal['price'])}`\n\n")
-        elif signal['type'] == 'Sell Wall': message += (f"🔴 **حائط بيع ضخم على ${symbol_name}**\n    - **الحجم:** `${signal['value']:,.0f}` USDT\n    - **عند سعر:** `{format_price(signal['price'])}`\n\n")
-        elif signal['type'] == 'Buy Pressure': message += (f"📈 **ضغط شراء عالٍ على ${symbol_name}**\n    - **النسبة:** الشراء يفوق البيع بـ `{signal['value']:.1f}x`\n\n")
-        elif signal['type'] == 'Sell Pressure': message += (f"📉 **ضغط بيع عالٍ على ${symbol_name}**\n    - **النسبة:** البيع يفوق الشراء بـ `{signal['value']:.1f}x`\n\n")
+    for symbol, signals in whale_signals_by_symbol.items():
+        symbol_name = symbol.replace('USDT', '')
+        for signal in signals:
+            if signal['type'] == 'Buy Wall':
+                message += f"🟢 **حائط شراء على ${symbol_name}**\n    - الحجم: `${signal['value']:,.0f}` USDT عند `{format_price(signal['price'])}`\n\n"
+            elif signal['type'] == 'Sell Wall':
+                message += f"🔴 **حائط بيع على ${symbol_name}**\n    - الحجم: `${signal['value']:,.0f}` USDT عند `{format_price(signal['price'])}`\n\n"
+            elif signal['type'] == 'Buy Pressure':
+                message += f"📈 **ضغط شراء على ${symbol_name}**\n    - اختلال الدفتر: `%{signal['value']:.2f}`\n\n"
+            elif signal['type'] == 'Sell Pressure':
+                message += f"📉 **ضغط بيع على ${symbol_name}**\n    - اختلال الدفتر: `%{signal['value']:.2f}`\n\n"
+
     await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
 
 async def get_performance_report(context, chat_id, message_id):
@@ -1627,36 +1557,40 @@ async def coiled_spring_radar_loop(client: BaseExchangeClient, bot_data: dict):
             if not market_data: continue
 
             candidates = [p for p in market_data if float(p.get('quoteVolume', '0')) > SNIPER_MIN_USDT_VOLUME]
-
-            # --- ✨ فلتر جديد لاستبعاد العملات غير المرغوب فيها (المستقرة والرافعة) ---
             filtered_candidates = [p for p in candidates if not is_excluded_symbol(p['symbol'])]
 
             async def check_candidate(symbol):
-                klines = await client.get_processed_klines(symbol, '15m', int(SNIPER_COMPRESSION_PERIOD_HOURS * 4))
+                # زيادة البيانات للتحقق من ضغط التقلب
+                klines = await client.get_processed_klines(symbol, '15m', int(SNIPER_COMPRESSION_PERIOD_HOURS * 4) + 50)
                 if not klines or len(klines) < int(SNIPER_COMPRESSION_PERIOD_HOURS * 4): return
 
-                high_prices = np.array([float(k[2]) for k in klines])
-                low_prices = np.array([float(k[3]) for k in klines])
-                volumes = np.array([float(k[5]) for k in klines])
+                recent_klines = klines[-int(SNIPER_COMPRESSION_PERIOD_HOURS * 4):]
+                
+                high_prices = np.array([float(k[2]) for k in recent_klines])
+                low_prices = np.array([float(k[3]) for k in recent_klines])
+                close_prices = np.array([float(k[4]) for k in recent_klines])
+                volumes = np.array([float(k[5]) for k in recent_klines])
 
-                highest_high = np.max(high_prices)
-                lowest_low = np.min(low_prices)
-
+                highest_high, lowest_low = np.max(high_prices), np.min(low_prices)
                 if lowest_low == 0: return
+                
                 volatility = ((highest_high - lowest_low) / lowest_low) * 100
-
-                if volatility <= SNIPER_MAX_VOLATILITY_PERCENT:
-                    poc = calculate_poc(klines)
+                
+                # فلتر ضغط التقلب (Bollinger Bandwidth)
+                historical_closes = [float(k[4]) for k in klines]
+                bbw = bollinger_bandwidth(historical_closes, period=len(recent_klines))
+                
+                # نعتبر "الضغط" إذا كان التقلب منخفضاً وعرض النطاق ضيقاً
+                if volatility <= SNIPER_MAX_VOLATILITY_PERCENT and (bbw is not None and bbw < 10): # 10 is an example threshold
+                    poc = calculate_poc(recent_klines)
                     if not poc: return
 
-                    avg_volume = np.mean(volumes)
                     if symbol not in sniper_watchlist[client.name]:
                         sniper_watchlist[client.name][symbol] = {
-                            'high': highest_high, 'low': lowest_low,
-                            'poc': poc,
-                            'avg_volume': avg_volume, 'duration_hours': SNIPER_COMPRESSION_PERIOD_HOURS
+                            'high': highest_high, 'low': lowest_low, 'poc': poc,
+                            'avg_volume': np.mean(volumes), 'duration_hours': SNIPER_COMPRESSION_PERIOD_HOURS
                         }
-                        logger.info(f"SNIPER RADAR ({client.name}): Added {symbol} to watchlist. POC: {poc:.8g}, Volatility: {volatility:.2f}%")
+                        logger.info(f"SNIPER RADAR ({client.name}): Added {symbol} to watchlist. Volatility: {volatility:.2f}%, BBW: {bbw:.2f}%")
 
             tasks = [check_candidate(p['symbol']) for p in filtered_candidates]
             await asyncio.gather(*tasks)
@@ -1665,11 +1599,8 @@ async def coiled_spring_radar_loop(client: BaseExchangeClient, bot_data: dict):
             logger.error(f"Error in coiled_spring_radar_loop for {client.name}: {e}", exc_info=True)
 
 async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: dict):
-    """
-    IMPROVED SNIPER TRIGGER with Multiple Confirmation Filters.
-    """
     if not client: return
-    logger.info(f"Sniper Trigger (v26 - Multi-Filter) background task started for {client.name}.")
+    logger.info(f"Sniper Trigger (v28 - Quantitative) background task started for {client.name}.")
     while True:
         await asyncio.sleep(SNIPER_TRIGGER_RUN_EVERY_SECONDS)
         if not bot_data.get('background_tasks_enabled', True): continue
@@ -1679,8 +1610,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
 
         for symbol, data in watchlist_copy:
             try:
-                # --- ✨ فلتر 1: الحد الأدنى للهدف المحتمل ✨ ---
-                # نتجاهل الصفقات ذات الأهداف الصغيرة جداً لزيادة الجدوى
+                # --- Filter 1: Potential Gain ---
                 range_height = data['high'] - data['low']
                 if data['high'] == 0: continue
                 potential_gain_percent = (range_height / data['high']) * 100
@@ -1688,68 +1618,72 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
                     if symbol in sniper_watchlist[client.name]: del sniper_watchlist[client.name][symbol]
                     continue
 
-                # --- ✨ فلتر 2: تأكيد الاتجاه العام الصاعد ✨ ---
-                # نتأكد أن الاختراق يحدث في سياق اتجاه عام صاعد لزيادة فرص النجاح
+                # --- Filter 2: Higher Timeframe Trend ---
                 trend_klines = await client.get_processed_klines(symbol, SNIPER_TREND_TIMEFRAME, SNIPER_TREND_PERIOD + 5)
                 if not trend_klines or len(trend_klines) < SNIPER_TREND_PERIOD: continue
-                
                 trend_closes = np.array([float(k[4]) for k in trend_klines])
                 trend_sma = calculate_sma(trend_closes, SNIPER_TREND_PERIOD)
-                current_price_for_trend = trend_closes[-1]
+                if trend_sma is None or trend_closes[-1] < trend_sma:
+                    continue 
 
-                if trend_sma is None or current_price_for_trend < trend_sma:
-                    continue # الاتجاه العام ليس صاعداً، نتجاهل الاختراق حالياً
-
-                klines = await client.get_processed_klines(symbol, '5m', 25) # جلب بيانات كافية لمتوسط الفوليوم
+                # --- Breakout Candle & Volume Check ---
+                klines = await client.get_processed_klines(symbol, '5m', 25)
                 if not klines or len(klines) < 20: continue
-
-                confirmation_candle = klines[-2]
-                trigger_candle = klines[-3]
+                confirmation_candle, trigger_candle = klines[-2], klines[-3]
                 breakout_level = data['high']
+                if float(trigger_candle[2]) < breakout_level or float(confirmation_candle[4]) < breakout_level:
+                    continue
                 
-                trigger_high = float(trigger_candle[2])
-                if trigger_high < breakout_level: continue
-
-                confirmation_close = float(confirmation_candle[4])
-                if confirmation_close < breakout_level: continue
-
-                # --- ✨ تحسين منطق الفوليوم ✨ ---
-                # مقارنة فوليوم الاختراق بمتوسط الفوليوم الأخير لنفس الإطار الزمني
                 trigger_volume = float(trigger_candle[5])
-                confirmation_volume = float(confirmation_candle[5])
-                recent_volumes = np.array([float(k[5]) for k in klines[-22:-2]]) # متوسط 20 شمعة قبل الاختراق
+                recent_volumes = np.array([float(k[5]) for k in klines[-22:-2]])
                 if len(recent_volumes) == 0: continue
                 avg_volume_5m = np.mean(recent_volumes)
-                
-                is_breakout_volume = (trigger_volume > avg_volume_5m * SNIPER_BREAKOUT_VOLUME_MULTIPLIER or
-                                      confirmation_volume > avg_volume_5m * SNIPER_BREAKOUT_VOLUME_MULTIPLIER)
+                if trigger_volume < avg_volume_5m * SNIPER_BREAKOUT_VOLUME_MULTIPLIER:
+                    continue
 
-                if not is_breakout_volume: continue
-                
-                alert_price = confirmation_close
-                invalidation_price = breakout_level
+                # --- Filter 3: Order Book Imbalance (OBI) ---
+                order_book = await client.get_order_book(symbol, WHALE_OBI_LEVELS)
+                if not order_book: continue
+                obi = order_book_imbalance(order_book.get('bids', []), order_book.get('asks', []))
+                if obi < SNIPER_OBI_THRESHOLD:
+                    continue
+
+                # --- Filter 4: VWAP Confirmation ---
+                vwap_klines = await client.get_processed_klines(symbol, '15m', 20)
+                if not vwap_klines: continue
+                vwap_prices = [float(k[4]) for k in vwap_klines]
+                vwap_volumes = [float(k[5]) for k in vwap_klines]
+                vwap_15m = calculate_vwap(vwap_prices, vwap_volumes, 14)
+                if vwap_15m and float(confirmation_candle[4]) < vwap_15m:
+                    continue
+
+                # --- All Filters Passed: Generate Signal ---
+                alert_price = float(confirmation_candle[4])
                 target_price = data['high'] + range_height
 
+                # Calculate ATR for Stop-Loss
+                atr_klines = await client.get_processed_klines(symbol, '15m', 15)
+                atr_val = calculate_atr([float(k[2]) for k in atr_klines], [float(k[3]) for k in atr_klines], [float(k[4]) for k in atr_klines])
+                stop_loss_price = alert_price - (atr_val * SNIPER_ATR_STOP_MULTIPLIER) if atr_val else data['low']
+
                 message = (
-                    f"🎯 **قناص (فلترة محسّنة): اختراق عالي الجودة!** 🎯\n\n"
+                    f"🎯 **قناص (إشارة كمّية): اختراق عالي الجودة!** 🎯\n\n"
                     f"**العملة:** `${symbol.replace('USDT', '')}` ({client.name})\n"
-                    f"**النمط:** اختراق مؤكد بالاتجاه الصاعد وفوليوم عالٍ.\n"
+                    f"**النمط:** اختراق مؤكد بالاتجاه، الحجم، وتدفق الأوامر.\n"
                     f"**سعر التأكيد:** `{format_price(alert_price)}`\n\n"
-                    f"📝 **خطة المراقبة:**\n"
-                    f"- **يفشل الاختراق بالإغلاق تحت:** `{format_price(invalidation_price)}`\n"
-                    f"- **هدف أولي محتمل:** `{format_price(target_price)}` (+{potential_gain_percent:.1f}%)\n\n"
-                    f"*(تمت فلترة هذه الإشارة بدقة. راقب الخطة جيداً)*"
+                    f"📝 **خطة المراقبة (مقترحة):**\n"
+                    f"- **وقف الخسارة (ATR):** `{format_price(stop_loss_price)}`\n"
+                    f"- **الهدف الأولي:** `{format_price(target_price)}` (+{potential_gain_percent:.1f}%)\n\n"
+                    f"*(تمت فلترة الإشارة بدقة. راقب الخطة جيداً)*"
                 )
                 await broadcast_message(bot, message)
-                logger.info(f"SNIPER TRIGGER (ENHANCED) ({client.name}): Confirmed breakout for {symbol}!")
+                logger.info(f"SNIPER TRIGGER (QUANT) ({client.name}): Confirmed breakout for {symbol}!")
 
                 sniper_tracker[client.name][symbol] = {
-                    'alert_time': datetime.now(UTC),
-                    'target_price': target_price,
-                    'invalidation_price': invalidation_price,
-                    'status': 'Tracking' 
+                    'alert_time': datetime.now(UTC), 'target_price': target_price,
+                    'invalidation_price': stop_loss_price, 'status': 'Tracking' 
                 }
-                logger.info(f"SNIPER TRACKER ({client.name}): Started tracking CONFIRMED breakout for {symbol}.")
+                logger.info(f"SNIPER TRACKER ({client.name}): Started tracking QUANT breakout for {symbol}.")
 
                 if symbol in sniper_watchlist[client.name]:
                     del sniper_watchlist[client.name][symbol]
@@ -1765,7 +1699,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
 # =============================================================================
 async def send_startup_message(bot: Bot):
     try:
-        message = "✅ **بوت الصياد الذكي (v26.0 - قناص الفلترة المحسّنة) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت الصياد الذكي (v28.0 - الترقية الكمّية) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         await broadcast_message(bot, message)
         logger.info("Startup message sent successfully to all users.")
     except Exception as e:
