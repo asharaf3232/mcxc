@@ -20,10 +20,6 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# --- START: Gemini AI Integration ---
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'YOUR_GEMINI_API_KEY') 
-# --- END: Gemini AI Integration ---
-
 # =============================================================================
 # --- 🔬 وحدة التحليل الفني المحسّنة (Analysis Module) 🔬 ---
 # =============================================================================
@@ -169,14 +165,13 @@ MOMENTUM_VOLUME_INCREASE = 1.8
 MOMENTUM_PRICE_INCREASE = 4.0
 MOMENTUM_KLINE_INTERVAL = '5m'
 MOMENTUM_KLINE_LIMIT = 12
-MOMENTUM_LOSS_THRESHOLD_PERCENT = -5.0
 MOMENTUM_MIN_SCORE = 3 # ⭐ الحد الأدنى لنقاط الزخم لإطلاق تنبيه
 
-# --- إعدادات وحدة القناص (Sniper Module) v28 ---
+# --- إعدادات وحدة القناص (Sniper Module) v30 ---
 SNIPER_RADAR_RUN_EVERY_MINUTES = 30
 SNIPER_TRIGGER_RUN_EVERY_SECONDS = 60
 SNIPER_COMPRESSION_PERIOD_HOURS = 8
-SNIPER_MAX_VOLATILITY_PERCENT = 8.0 
+SNIPER_MAX_VOLATILITY_PERCENT = 8.0 # فلتر التقلب المبدئي للرادار
 SNIPER_BREAKOUT_VOLUME_MULTIPLIER = 3.5 
 SNIPER_MIN_USDT_VOLUME = 200000
 SNIPER_MIN_TARGET_PERCENT = 3.0 
@@ -334,49 +329,6 @@ def format_price(price_str):
             return f"{price:.10f}".rstrip('0')
         return f"{price:.8g}"
     except (ValueError, TypeError): return price_str
-
-# --- START: Gemini AI Integration ---
-async def call_gemini_api(session: aiohttp.ClientSession, prompt: str):
-    """
-    وظيفة مساعدة لإرسال طلب إلى Google Gemini API والحصول على استجابة نصية.
-    """
-    if not GEMINI_API_KEY or 'YOUR_GEMINI_API_KEY' in GEMINI_API_KEY:
-        logger.error("Gemini API key is not configured.")
-        return "خطأ: مفتاح Gemini API غير مهيأ. يرجى إضافته."
-
-    # --- FIX: Updated model name from 'gemini-pro' to 'gemini-1.0-pro' ---
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.0-pro:generateContent?key={GEMINI_API_KEY}"
-    
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }]
-    }
-    
-    headers = {'Content-Type': 'application/json'}
-
-    try:
-        async with session.post(api_url, json=payload, headers=headers, timeout=30) as response:
-            response.raise_for_status()
-            result = await response.json()
-            
-            if 'candidates' in result and len(result['candidates']) > 0:
-                content = result['candidates'][0].get('content', {})
-                if 'parts' in content and len(content['parts']) > 0:
-                    return content['parts'][0].get('text', "لم يتمكن الذكاء الاصطناعي من تقديم إجابة.")
-            
-            logger.warning(f"Gemini API response structure is unexpected: {result}")
-            return "حدث خطأ في استلام رد من الذكاء الاصطناعي."
-
-    except aiohttp.ClientResponseError as e:
-        logger.error(f"HTTP Error calling Gemini API: {e.status} - {e.message}")
-        # Return the actual error code to the user for better debugging
-        return f"خطأ في الاتصال بخدمة الذكاء الاصطناعي: {e.status}"
-    except Exception as e:
-        logger.error(f"An unexpected error occurred while calling Gemini API: {e}", exc_info=True)
-        return "حدث خطأ فادح أثناء التواصل مع الذكاء الاصطناعي."
-
-# --- END: Gemini AI Integration ---
 
 # =============================================================================
 # --- ⚙️ قسم عملاء المنصات (Exchange Clients) ⚙️ ---
@@ -978,7 +930,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not symbol.endswith("USDT"): symbol += "USDT"
         context.user_data['awaiting_symbol_for_ta'] = False
         context.args = [symbol]
-        await run_full_technical_analysis_with_ai(update, context)
+        await run_full_technical_analysis(update, context)
         return
 
     if context.user_data.get('awaiting_symbol_for_scalp'):
@@ -1060,87 +1012,71 @@ async def send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, te
         await context.bot.send_message(chat_id=chat_id, text=part, **kwargs)
         await asyncio.sleep(0.5)
 
-async def run_full_technical_analysis_with_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def run_full_technical_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     symbol = context.args[0]
 
     current_exchange = context.user_data.get('exchange', 'mexc')
     client = get_exchange_client(current_exchange, context.application.bot_data['session'])
 
-    sent_message = await context.bot.send_message(chat_id=chat_id, text=f"🔬 جارِ إجراء تحليل فني شامل لـ ${symbol} بواسطة المحلل الذكي...")
+    sent_message = await context.bot.send_message(chat_id=chat_id, text=f"🔬 جارِ إجراء تحليل فني شامل لـ ${symbol} على {client.name}...")
 
     try:
         timeframes = {'يومي': '1d', '4 ساعات': '4h', 'ساعة': '1h'}
+        tf_weights = {'يومي': 3, '4 ساعات': 2, 'ساعة': 1}
         report_parts = []
-        analysis_data_for_ai = {'symbol': symbol, 'exchange': client.name, 'timeframes': {}}
-        
         header = f"📊 **التحليل الفني المفصل لـ ${symbol}** ({client.name})\n_{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_\n\n"
+        overall_score = 0
 
         for tf_name, tf_interval in timeframes.items():
             klines = await client.get_processed_klines(symbol, tf_interval, TA_KLINE_LIMIT)
             tf_report = f"--- **إطار {tf_name}** ---\n"
-            
+
             if not klines or len(klines) < TA_MIN_KLINE_COUNT:
-                tf_report += "لا توجد بيانات كافية للتحليل.\n\n"
-                report_parts.append(tf_report)
-                continue
+                tf_report += "لا توجد بيانات كافية للتحليل.\n\n"; report_parts.append(tf_report); continue
 
             close_prices = np.array([float(k[4]) for k in klines[-TA_KLINE_LIMIT:]])
             high_prices = np.array([float(k[2]) for k in klines[-TA_KLINE_LIMIT:]])
             low_prices = np.array([float(k[3]) for k in klines[-TA_KLINE_LIMIT:]])
             current_price = close_prices[-1]
             report_lines = []
-
-            tf_data_for_ai = {'current_price': current_price}
+            weight = tf_weights[tf_name]
 
             ema21, ema50, sma100 = calculate_ema(close_prices, 21), calculate_ema(close_prices, 50), calculate_sma(close_prices, 100)
             trend_text, trend_score = analyze_trend(current_price, ema21, ema50, sma100)
-            report_lines.append(f"**الاتجاه:** {trend_text}")
-            tf_data_for_ai['trend'] = trend_text.split('.')[0] # Get the core trend text
+            report_lines.append(f"**الاتجاه:** {trend_text}"); overall_score += trend_score * weight
 
             macd_line, signal_line = calculate_macd(close_prices)
             if macd_line is not None and signal_line is not None:
-                macd_status = "إيجابي" if macd_line > signal_line else "سلبي"
-                report_lines.append(f"{'🟢' if macd_status == 'إيجابي' else '🔴'} **MACD:** {macd_status}.")
-                tf_data_for_ai['macd'] = macd_status
+                if macd_line > signal_line: report_lines.append(f"🟢 **MACD:** إيجابي."); overall_score += 1 * weight
+                else: report_lines.append(f"🔴 **MACD:** سلبي."); overall_score -= 1 * weight
 
             rsi = calculate_rsi(close_prices)
             if rsi:
-                rsi_status = "تشبع شرائي" if rsi > 70 else "تشبع بيعي" if rsi < 30 else "محايد"
-                report_lines.append(f"{'🔴' if rsi_status == 'تشبع شرائي' else '🟢' if rsi_status == 'تشبع بيعي' else '🟡'} **RSI ({rsi:.1f}):** {rsi_status}.")
-                tf_data_for_ai['rsi'] = f"{rsi:.1f} ({rsi_status})"
+                if rsi > 70: report_lines.append(f"🔴 **RSI ({rsi:.1f}):** تشبع شرائي."); overall_score -= 1 * weight
+                elif rsi < 30: report_lines.append(f"🟢 **RSI ({rsi:.1f}):** تشبع بيعي."); overall_score += 1 * weight
+                else: report_lines.append(f"🟡 **RSI ({rsi:.1f}):** محايد.")
 
             supports, resistances = find_support_resistance(high_prices, low_prices)
             next_res = min([r for r in resistances if r > current_price], default=None)
-            if next_res:
-                report_lines.append(f"🛡️ **أقرب مقاومة:** {format_price(next_res)}")
-                tf_data_for_ai['next_resistance'] = format_price(next_res)
-            
+            if next_res: report_lines.append(f"🛡️ **أقرب مقاومة:** {format_price(next_res)}")
             next_sup = max([s for s in supports if s < current_price], default=None)
-            if next_sup:
-                report_lines.append(f"💰 **أقرب دعم:** {format_price(next_sup)}")
-                tf_data_for_ai['next_support'] = format_price(next_sup)
+            if next_sup: report_lines.append(f"💰 **أقرب دعم:** {format_price(next_sup)}")
+            else: report_lines.append("💰 **أقرب دعم:** لا يوجد دعم واضح أدناه.")
 
-            analysis_data_for_ai['timeframes'][tf_name] = tf_data_for_ai
+            fib_levels = calculate_fibonacci_retracement(high_prices, low_prices)
+            if fib_levels:
+                report_lines.append(f"🎚️ **فيبوناتشي:** 0.5: `{format_price(fib_levels['level_0.5'])}` | 0.618: `{format_price(fib_levels['level_0.618'])}`")
 
             tf_report += "\n".join(report_lines) + f"\n*السعر الحالي: {format_price(current_price)}*\n\n"
             report_parts.append(tf_report)
-            
-        prompt = (
-            "You are a professional technical analyst for the cryptocurrency market. Your task is to analyze the following technical data for a specific coin and provide a concise, intelligent summary for traders. Analyze in Arabic.\n\n"
-            "Data:\n"
-            f"{json.dumps(analysis_data_for_ai, indent=2, ensure_ascii=False)}\n\n"
-            "Required Analysis (in Arabic):\n"
-            "1. Provide a short paragraph as an 'analytical summary' that connects the different signals across the multiple timeframes.\n"
-            "2. Conclude whether the overall situation is bullish, bearish, or neutral.\n"
-            "3. Mention the most important point a trader should pay attention to right now (e.g., price approaching strong resistance, divergence appearing, or oversold on a large frame).\n"
-            "Keep your analysis clear, direct, and avoid overly complex jargon."
-        )
-        
-        session = context.application.bot_data['session']
-        ai_summary = await call_gemini_api(session, prompt)
 
-        summary_report = f"--- **🧠 ملخص المحلل الذكي** ---\n{ai_summary}\n\n"
+        summary_report = "--- **ملخص التحليل الذكي** ---\n"
+        if overall_score >= 5: summary_report += f"🟢 **التحليل العام يميل للإيجابية بقوة (النقاط: {overall_score}).**"
+        elif overall_score > 0: summary_report += f"🟢 **التحليل العام يميل للإيجابية (النقاط: {overall_score}).**"
+        elif overall_score <= -5: summary_report += f"🔴 **التحليل العام يميل للسلبية بقوة (النقاط: {overall_score}).**"
+        elif overall_score < 0: summary_report += f"🔴 **التحليل العام يميل للسلبية (النقاط: {overall_score}).**"
+        else: summary_report += f"🟡 **السوق في حيرة، الإشارات متضاربة (النقاط: {overall_score}).**"
         report_parts.append(summary_report)
 
         await context.bot.delete_message(chat_id=chat_id, message_id=sent_message.message_id)
@@ -1148,8 +1084,8 @@ async def run_full_technical_analysis_with_ai(update: Update, context: ContextTy
         await send_long_message(context, chat_id, full_message, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
-        logger.error(f"Error in full technical analysis with AI for {symbol}: {e}", exc_info=True)
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ فادح أثناء تحليل {symbol} بواسطة الذكاء الاصطناعي.")
+        logger.error(f"Error in full technical analysis for {symbol}: {e}", exc_info=True)
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ فادح أثناء تحليل {symbol}.")
 
 async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
@@ -1690,7 +1626,7 @@ async def performance_tracker_loop(session: aiohttp.ClientSession, bot: Bot):
 
 async def coiled_spring_radar_loop(client: BaseExchangeClient, bot_data: dict):
     if not client: return
-    logger.info(f"Sniper Radar background task started for {client.name}.")
+    logger.info(f"Sniper Radar (v30 - Calibrated) background task started for {client.name}.")
     while True:
         await asyncio.sleep(SNIPER_RADAR_RUN_EVERY_MINUTES * 60)
         if not bot_data.get('background_tasks_enabled', True): continue
@@ -1703,29 +1639,23 @@ async def coiled_spring_radar_loop(client: BaseExchangeClient, bot_data: dict):
             filtered_candidates = [p for p in candidates if not is_excluded_symbol(p['symbol'])]
 
             async def check_candidate(symbol):
-                # زيادة البيانات للتحقق من ضغط التقلب
-                klines = await client.get_processed_klines(symbol, '15m', int(SNIPER_COMPRESSION_PERIOD_HOURS * 4) + 50)
+                klines = await client.get_processed_klines(symbol, '15m', int(SNIPER_COMPRESSION_PERIOD_HOURS * 4))
                 if not klines or len(klines) < int(SNIPER_COMPRESSION_PERIOD_HOURS * 4): return
 
-                recent_klines = klines[-int(SNIPER_COMPRESSION_PERIOD_HOURS * 4):]
-                
-                high_prices = np.array([float(k[2]) for k in recent_klines])
-                low_prices = np.array([float(k[3]) for k in recent_klines])
-                close_prices = np.array([float(k[4]) for k in recent_klines])
-                volumes = np.array([float(k[5]) for k in recent_klines])
+                high_prices = np.array([float(k[2]) for k in klines])
+                low_prices = np.array([float(k[3]) for k in klines])
+                volumes = np.array([float(k[5]) for k in klines])
 
-                highest_high, lowest_low = np.max(high_prices), np.min(low_prices)
+                highest_high = np.max(high_prices)
+                lowest_low = np.min(low_prices)
+
                 if lowest_low == 0: return
-                
                 volatility = ((highest_high - lowest_low) / lowest_low) * 100
-                
-                # فلتر ضغط التقلب (Bollinger Bandwidth)
-                historical_closes = [float(k[4]) for k in klines]
-                bbw = bollinger_bandwidth(historical_closes, period=len(recent_klines))
-                
-                # نعتبر "الضغط" إذا كان التقلب منخفضاً وعرض النطاق ضيقاً
-                if volatility <= SNIPER_MAX_VOLATILITY_PERCENT and (bbw is not None and bbw < 10): # 10 is an example threshold
-                    poc = calculate_poc(recent_klines)
+
+                # ⭐ تمت معايرة الرادار: الاعتماد على فلتر التقلب الرئيسي فقط لإضافة الأهداف
+                # الفلاتر الإضافية الصارمة ستكون في مرحلة "الزناد"
+                if volatility <= SNIPER_MAX_VOLATILITY_PERCENT:
+                    poc = calculate_poc(klines)
                     if not poc: return
 
                     if symbol not in sniper_watchlist[client.name]:
@@ -1733,7 +1663,7 @@ async def coiled_spring_radar_loop(client: BaseExchangeClient, bot_data: dict):
                             'high': highest_high, 'low': lowest_low, 'poc': poc,
                             'avg_volume': np.mean(volumes), 'duration_hours': SNIPER_COMPRESSION_PERIOD_HOURS
                         }
-                        logger.info(f"SNIPER RADAR ({client.name}): Added {symbol} to watchlist. Volatility: {volatility:.2f}%, BBW: {bbw:.2f}%")
+                        logger.info(f"SNIPER RADAR ({client.name}): Added {symbol} to watchlist. Volatility: {volatility:.2f}%")
 
             tasks = [check_candidate(p['symbol']) for p in filtered_candidates]
             await asyncio.gather(*tasks)
@@ -1743,7 +1673,7 @@ async def coiled_spring_radar_loop(client: BaseExchangeClient, bot_data: dict):
 
 async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: dict):
     if not client: return
-    logger.info(f"Sniper Trigger (v28 - Quantitative) background task started for {client.name}.")
+    logger.info(f"Sniper Trigger (v30 - Quantitative) background task started for {client.name}.")
     while True:
         await asyncio.sleep(SNIPER_TRIGGER_RUN_EVERY_SECONDS)
         if not bot_data.get('background_tasks_enabled', True): continue
@@ -1842,7 +1772,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
 # =============================================================================
 async def send_startup_message(bot: Bot):
     try:
-        message = "✅ **بوت الصياد الذكي (v30.1 - إصلاح API) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت الصياد الذكي (v30.0 - معايرة الرادار) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         await broadcast_message(bot, message)
         logger.info("Startup message sent successfully to all users.")
     except Exception as e:
@@ -1874,9 +1804,6 @@ def main() -> None:
     if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN:
         logger.critical("FATAL ERROR: Bot token is not set.")
         return
-    if 'YOUR_GEMINI' in GEMINI_API_KEY:
-        logger.warning("GEMINI API KEY is not set. AI features will be disabled.")
-
 
     setup_database()
 
