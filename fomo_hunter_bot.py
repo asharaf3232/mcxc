@@ -1239,33 +1239,77 @@ async def run_whale_radar_scan(context, chat_id, message_id, client: BaseExchang
 
 async def get_performance_report(context, chat_id, message_id):
     try:
-        if not any(performance_tracker.values()):
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="ℹ️ لا توجد عملات قيد تتبع الأداء حالياً."); return
-        message = "📊 **تقرير أداء العملات المرصودة** 📊\n\n"
-        all_tracked_items = []
-        for platform_name, symbols_data in performance_tracker.items():
-            for symbol, data in symbols_data.items():
-                data_copy = data.copy(); data_copy['exchange'] = platform_name
-                all_tracked_items.append((symbol, data_copy))
-        sorted_symbols = sorted(all_tracked_items, key=lambda item: item[1]['alert_time'], reverse=True)
-        for symbol, data in sorted_symbols:
-            if data.get('status') == 'Archived': continue
-            alert_price, current_price, high_price = data.get('alert_price',0), data.get('current_price', data.get('alert_price',0)), data.get('high_price', data.get('alert_price',0))
-            current_change = ((current_price - alert_price) / alert_price) * 100 if alert_price > 0 else 0
-            peak_change = ((high_price - alert_price) / alert_price) * 100 if alert_price > 0 else 0
-            emoji = "🟢" if current_change >= 0 else "🔴"
-            time_since_alert = datetime.now(UTC) - data['alert_time']
-            hours, remainder = divmod(time_since_alert.total_seconds(), 3600)
-            minutes, _ = divmod(remainder, 60)
-            time_str = f"{int(hours)} س و {int(minutes)} د"
-            message += (f"{emoji} **${symbol.replace('USDT','')}** ({data.get('exchange', 'N/A')}) (منذ {time_str})\n"
-                            f"    - سعر التنبيه: `${format_price(alert_price)}`\n"
-                            f"    - السعر الحالي: `${format_price(current_price)}` (**{current_change:+.2f}%**)\n"
-                            f"    - أعلى سعر: `${format_price(high_price)}` (**{peak_change:+.2f}%**)\n\n")
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+        no_fomo_data = not any(performance_tracker.values())
+        no_sniper_data = not any(sniper_tracker.values())
+
+        if no_fomo_data and no_sniper_data:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="ℹ️ لا توجد عملات قيد تتبع الأداء حالياً.")
+            return
+
+        message = "📊 **تقرير الأداء الشامل** 📊\n\n"
+        
+        # --- قسم متتبع الأداء العام ---
+        if not no_fomo_data:
+            message += "📈 **أداء عملات الزخم** 📈\n\n"
+            all_tracked_items = []
+            for platform_name, symbols_data in performance_tracker.items():
+                for symbol, data in symbols_data.items():
+                    data_copy = data.copy(); data_copy['exchange'] = platform_name
+                    all_tracked_items.append((symbol, data_copy))
+            
+            sorted_symbols = sorted(all_tracked_items, key=lambda item: item[1]['alert_time'], reverse=True)
+            for symbol, data in sorted_symbols:
+                if data.get('status') == 'Archived': continue
+                alert_price = data.get('alert_price',0)
+                current_price = data.get('current_price', alert_price)
+                high_price = data.get('high_price', alert_price)
+                current_change = ((current_price - alert_price) / alert_price) * 100 if alert_price > 0 else 0
+                peak_change = ((high_price - alert_price) / alert_price) * 100 if alert_price > 0 else 0
+                emoji = "🟢" if current_change >= 0 else "🔴"
+                time_since_alert = datetime.now(UTC) - data['alert_time']
+                hours, remainder = divmod(time_since_alert.total_seconds(), 3600)
+                minutes, _ = divmod(remainder, 60)
+                time_str = f"{int(hours)} س و {int(minutes)} د"
+                message += (f"{emoji} **${symbol.replace('USDT','')}** ({data.get('exchange', 'N/A')}) (منذ {time_str})\n"
+                                f"    - سعر التنبيه: `${format_price(alert_price)}`\n"
+                                f"    - السعر الحالي: `${format_price(current_price)}` (**{current_change:+.2f}%**)\n"
+                                f"    - أعلى سعر: `${format_price(high_price)}` (**{peak_change:+.2f}%**)\n\n")
+
+        # --- قسم متتبع القناص ---
+        if not no_sniper_data:
+            message += "\n\n🔫 **متابعة نتائج القناص** 🔫\n\n"
+            all_sniper_items = []
+            for platform_name, symbols_data in sniper_tracker.items():
+                for symbol, data in symbols_data.items():
+                    if data.get('status') != 'Tracking': continue
+                    data_copy = data.copy(); data_copy['exchange'] = platform_name
+                    all_sniper_items.append((symbol, data_copy))
+            
+            sorted_sniper_items = sorted(all_sniper_items, key=lambda item: item[1]['alert_time'], reverse=True)
+            
+            for symbol, data in sorted_sniper_items:
+                time_since_alert = datetime.now(UTC) - data['alert_time']
+                hours, remainder = divmod(time_since_alert.total_seconds(), 3600)
+                minutes, _ = divmod(remainder, 60)
+                time_str = f"{int(hours)} س و {int(minutes)} د"
+                message += (
+                    f"🎯 **${symbol.replace('USDT','')}** ({data.get('exchange', 'N/A')}) (منذ {time_str})\n"
+                    f"    - **الحالة:** `قيد المتابعة`\n"
+                    f"    - **الهدف:** `{format_price(data['target_price'])}`\n"
+                    f"    - **نقطة الفشل:** `{format_price(data['invalidation_price'])}`\n\n"
+                )
+        
+        # --- إرسال الرسالة المقسمة ---
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        await send_long_message(context, chat_id, message, parse_mode=ParseMode.MARKDOWN)
+
     except Exception as e:
         logger.error(f"Error in get_performance_report: {e}", exc_info=True)
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ أثناء جلب تقرير الأداء.")
+        try:
+             await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ أثناء جلب تقرير الأداء.")
+        except Exception:
+             logger.error(f"Could not edit message to show error for chat_id {chat_id}")
+
 
 async def run_top_gainers(context, chat_id, message_id, client: BaseExchangeClient):
     initial_text = f"📈 **الأعلى ربحاً ({client.name})**\n\n🔍 جارِ جلب البيانات..."
@@ -1603,7 +1647,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
 # =============================================================================
 async def send_startup_message(bot: Bot):
     try:
-        message = "✅ **بوت الصياد الذكي (v23.3 - متتبع القناص) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت الصياد الذكي (v23.4 - تقرير الأداء المدمج) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         await broadcast_message(bot, message)
         logger.info("Startup message sent successfully to all users.")
     except Exception as e:
