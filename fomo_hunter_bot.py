@@ -155,7 +155,7 @@ WHALE_GEM_MAX_VOLUME_24H = 5000000
 WHALE_WALL_THRESHOLD_USDT = 25000
 WHALE_PRESSURE_RATIO = 3.0
 WHALE_SCAN_CANDIDATE_LIMIT = 50
-WHALE_OBI_LEVELS = 10 # عدد المستويات لحساب اختلال دفتر الأوامر
+WHALE_OBI_LEVELS = 10 
 
 # --- إعدادات كاشف الزخم ---
 MOMENTUM_MAX_PRICE = 0.10
@@ -166,19 +166,20 @@ MOMENTUM_PRICE_INCREASE = 4.0
 MOMENTUM_KLINE_INTERVAL = '5m'
 MOMENTUM_KLINE_LIMIT = 12
 MOMENTUM_LOSS_THRESHOLD_PERCENT = -5.0
+MOMENTUM_MIN_SCORE = 3 # ⭐ الحد الأدنى لنقاط الزخم لإطلاق تنبيه
 
 # --- إعدادات وحدة القناص (Sniper Module) v28 ---
 SNIPER_RADAR_RUN_EVERY_MINUTES = 30
 SNIPER_TRIGGER_RUN_EVERY_SECONDS = 60
 SNIPER_COMPRESSION_PERIOD_HOURS = 8
-SNIPER_MAX_VOLATILITY_PERCENT = 8.0 # فلتر التقلب المبدئي
-SNIPER_BREAKOUT_VOLUME_MULTIPLIER = 3.5 # مضاعف الحجم المطلوب للاختراق
+SNIPER_MAX_VOLATILITY_PERCENT = 8.0 
+SNIPER_BREAKOUT_VOLUME_MULTIPLIER = 3.5 
 SNIPER_MIN_USDT_VOLUME = 200000
-SNIPER_MIN_TARGET_PERCENT = 3.0 # الحد الأدنى لربح الصفقة المحتمل
+SNIPER_MIN_TARGET_PERCENT = 3.0 
 SNIPER_TREND_TIMEFRAME = '1h'
 SNIPER_TREND_PERIOD = 50
-SNIPER_OBI_THRESHOLD = 0.15 # عتبة اختلال دفتر الأوامر لتأكيد الشراء
-SNIPER_ATR_STOP_MULTIPLIER = 2.0 # مضاعف ATR لوضع وقف الخسارة
+SNIPER_OBI_THRESHOLD = 0.15 
+SNIPER_ATR_STOP_MULTIPLIER = 2.0 
 
 # --- إعدادات صائد الجواهر (Gem Hunter Settings) ---
 GEM_MIN_CORRECTION_PERCENT = -70.0
@@ -692,29 +693,81 @@ def order_book_imbalance(bids, asks, top_n=10):
 # =============================================================================
 # --- الوظائف المساعدة للتحليل ---
 # =============================================================================
-async def helper_get_momentum_symbols(client: BaseExchangeClient):
+async def helper_get_advanced_momentum(client: BaseExchangeClient):
+    """
+    ⭐ وظيفة الزخم المطورة: تحسب نقاط الزخم بناء على معايير متعددة.
+    """
     market_data = await client.get_market_data()
-    if not market_data: return {}
-    potential_coins = [p for p in market_data if float(p.get('lastPrice','1')) <= MOMENTUM_MAX_PRICE and MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= MOMENTUM_MAX_VOLUME_24H]
-    if not potential_coins: return {}
-    tasks = [client.get_processed_klines(p['symbol'], MOMENTUM_KLINE_INTERVAL, MOMENTUM_KLINE_LIMIT) for p in potential_coins]
-    all_klines_data = await asyncio.gather(*tasks)
-    momentum_coins_data = {}
-    for i, klines in enumerate(all_klines_data):
-        if not klines or len(klines) < MOMENTUM_KLINE_LIMIT: continue
+    if not market_data: return []
+
+    potential_coins = [
+        p for p in market_data 
+        if float(p.get('lastPrice','1')) <= MOMENTUM_MAX_PRICE 
+        and MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= MOMENTUM_MAX_VOLUME_24H
+    ]
+    if not potential_coins: return []
+
+    async def score_candidate(symbol):
         try:
-            klines = klines[-MOMENTUM_KLINE_LIMIT:]
-            sp = MOMENTUM_KLINE_LIMIT // 2
-            old_v = sum(float(k[5]) for k in klines[:sp]); new_v = sum(float(k[5]) for k in klines[sp:])
-            start_p = float(klines[sp][1])
-            if old_v == 0 or start_p == 0: continue
-            end_p = float(klines[-1][4])
-            price_change = ((end_p - start_p) / start_p) * 100
-            if new_v > old_v * MOMENTUM_VOLUME_INCREASE and price_change > MOMENTUM_PRICE_INCREASE:
-                coin_symbol = potential_coins[i]['symbol']
-                momentum_coins_data[coin_symbol] = {'symbol': coin_symbol, 'price_change': price_change, 'current_price': end_p, 'peak_volume': new_v}
-        except (ValueError, IndexError, TypeError): continue
-    return momentum_coins_data
+            klines_5m = await client.get_processed_klines(symbol, '5m', 30)
+            if not klines_5m or len(klines_5m) < 20: return None
+
+            score = 0
+            details = {'symbol': symbol}
+
+            close_prices = np.array([float(k[4]) for k in klines_5m])
+            volumes = np.array([float(k[5]) for k in klines_5m])
+            current_price = close_prices[-1]
+            
+            # 1. Price Change (last 60 mins)
+            start_price = float(klines_5m[-12][4])
+            if start_price > 0:
+                price_change = ((current_price - start_price) / start_price) * 100
+                if price_change > MOMENTUM_PRICE_INCREASE:
+                    score += 1
+                details['price_change'] = price_change
+
+            # 2. Volume Surge (last 60 mins vs previous 60)
+            old_volume = sum(float(k[5]) for k in klines_5m[-24:-12]) if len(klines_5m) >= 24 else 0
+            new_volume = sum(float(k[5]) for k in klines_5m[-12:])
+            if old_volume > 0 and new_volume > old_volume * MOMENTUM_VOLUME_INCREASE:
+                score += 1
+
+            # 3. Price Action Consistency (last 5 candles)
+            positive_candles = sum(1 for k in klines_5m[-5:] if float(k[4]) > float(k[1]))
+            if positive_candles >= 3:
+                score += 1
+            details['positive_candles'] = f"{positive_candles}/5"
+
+            # 4. RSI Strength
+            rsi = calculate_rsi(close_prices, period=14)
+            if rsi:
+                details['rsi'] = rsi
+                if rsi > 60: score += 1
+                if rsi > 85: score -= 1 # Penalty for over-excitement
+
+            # 5. VWAP Confirmation (using 15m for stability)
+            klines_15m = await client.get_processed_klines(symbol, '15m', 20)
+            if klines_15m:
+                vwap = calculate_vwap([float(k[4]) for k in klines_15m], [float(k[5]) for k in klines_15m], 14)
+                if vwap and current_price > vwap:
+                    score += 1
+            
+            details['score'] = score
+            details['current_price'] = current_price
+
+            if score >= MOMENTUM_MIN_SCORE:
+                return details
+            return None
+        except Exception:
+            return None
+
+    tasks = [score_candidate(p['symbol']) for p in potential_coins]
+    results = await asyncio.gather(*tasks)
+    
+    momentum_coins = [res for res in results if res is not None]
+    return sorted(momentum_coins, key=lambda x: x['score'], reverse=True)
+
 
 async def helper_get_whale_activity(client: BaseExchangeClient):
     market_data = await client.get_market_data()
@@ -830,7 +883,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**🚀 2. أرصد الزخم الحالي (الكواشف):**\n"
         "أخبرك بالعملات التي تشهد زخماً قوياً، أو نشاط حيتان، أو أنماطاً متكررة الآن، لتكون على دراية كاملة بما يحدث في السوق لحظة بلحظة.\n\n"
         "**🔬 3. أحلل أي عملة تطلبها (المحلل الفني):**\n"
-        "أرسل لي رمز أي عملة (مثل BTC)، وسأقدم لك تقريراً فنياً مفصلاً عنها على عدة أطر زمنية في ثوانٍ, لمساعدتك في اتخاذ قراراتك.\n\n"
+        "أرسل لي رمز أي عملة (مثل BTC)، وسأقدم لك تقريباً فنياً مفصلاً عنها على عدة أطر زمنية في ثوانٍ, لمساعدتك في اتخاذ قراراتك.\n\n"
         "**كيف تبدأ؟**\n"
         "استخدم لوحة الأزرار أدناه لاستكشاف السوق والبدء في الصيد.\n\n"
         "⚠️ **تنبيه هام:** أنا أداة للمساعدة والتحليل فقط، ولست مستشاراً مالياً. التداول ينطوي على مخاطر عالية، وقراراتك تقع على عاتقك بالكامل."
@@ -1152,21 +1205,35 @@ async def run_pro_scan(context, chat_id, message_id, client: BaseExchangeClient)
 
 
 async def run_momentum_detector(context, chat_id, message_id, client: BaseExchangeClient):
-    initial_text = f"🚀 **كاشف الزخم ({client.name})**\n\n🔍 جارِ الفحص المنظم للسوق..."
+    """
+    ⭐ عرض تقرير الزخم المطور للمستخدم عند الطلب.
+    """
+    initial_text = f"🚀 **كاشف الزخم المطور ({client.name})**\n\n🔍 جارِ الفحص الكمّي للسوق..."
     try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
     except Exception: pass
-    momentum_coins_data = await helper_get_momentum_symbols(client)
-    if not momentum_coins_data:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **الفحص على {client.name} اكتمل:** لا يوجد زخم حالياً."); return
-    sorted_coins = sorted(momentum_coins_data.values(), key=lambda x: x['price_change'], reverse=True)
-    message = f"🚀 **تقرير الزخم ({client.name}) - {datetime.now().strftime('%H:%M:%S')}** 🚀\n\n"
-    for i, coin in enumerate(sorted_coins[:10]):
-        message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n    - السعر: `${format_price(coin['current_price'])}`\n    - **زخم آخر 30 دقيقة: `%{coin['price_change']:+.2f}`**\n\n")
+    
+    momentum_coins = await helper_get_advanced_momentum(client)
+    
+    if not momentum_coins:
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **فحص الزخم على {client.name} اكتمل:** لا يوجد زخم قوي حالياً."); return
+    
+    message = f"🚀 **تقرير الزخم الكمّي ({client.name})** 🚀\n\n"
+    for i, coin in enumerate(momentum_coins[:5]):
+        price_change_str = f"`%{coin['price_change']:.2f}`" if 'price_change' in coin else "N/A"
+        rsi_str = f"`{coin['rsi']:.1f}`" if 'rsi' in coin else "N/A"
+        
+        message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n"
+                    f"    - **نقاط الزخم:** `{coin['score']}` ⭐\n"
+                    f"    - السعر الحالي: `${format_price(coin['current_price'])}`\n"
+                    f"    - التغير (60د): {price_change_str}\n"
+                    f"    - مؤشر القوة: {rsi_str}\n\n")
+                    
     message += "*(تمت إضافة هذه العملات إلى متتبع الأداء.)*"
     await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+    
     now = datetime.now(UTC)
-    for coin in sorted_coins[:10]:
-        add_to_monitoring(coin['symbol'], float(coin['current_price']), coin.get('peak_volume', 0), now, f"الزخم ({client.name})", client.name)
+    for coin in momentum_coins[:5]:
+        add_to_monitoring(coin['symbol'], float(coin['current_price']), 0, now, f"الزخم ({client.name})", client.name)
 
 async def run_whale_radar_scan(context, chat_id, message_id, client: BaseExchangeClient):
     initial_text = f"🐋 **رادار الحيتان ({client.name})**\n\n🔍 جارِ الفحص العميق..."
@@ -1409,33 +1476,46 @@ def add_to_monitoring(symbol, alert_price, peak_volume, alert_time, source, exch
         logger.info(f"PERFORMANCE TRACKING STARTED for {symbol} on {exchange_name}")
 
 async def fomo_hunter_loop(client: BaseExchangeClient, bot: Bot, bot_data: dict):
+    """
+    ⭐ مهمة خلفية تستخدم مكتشف الزخم المطور لإرسال تنبيهات تلقائية.
+    """
     if not client: return
-    logger.info(f"Fomo Hunter background task started for {client.name}.")
+    logger.info(f"Fomo Hunter (v29) background task started for {client.name}.")
     while True:
         await asyncio.sleep(RUN_FOMO_SCAN_EVERY_MINUTES * 60)
         if not bot_data.get('background_tasks_enabled', True): continue
-        logger.info(f"===== Fomo Hunter ({client.name}): Starting Automatic Scan =====")
+        logger.info(f"===== Fomo Hunter ({client.name}): Starting Advanced Scan =====")
         try:
-            momentum_coins_data = await helper_get_momentum_symbols(client)
-            if not momentum_coins_data:
+            momentum_coins = await helper_get_advanced_momentum(client)
+            if not momentum_coins:
                 logger.info(f"Fomo Hunter ({client.name}): No significant momentum detected."); continue
+                
             now = datetime.now(UTC)
             new_alerts = []
-            for symbol, data in momentum_coins_data.items():
+            for coin in momentum_coins:
+                symbol = coin['symbol']
                 last_alert_time = recently_alerted_fomo[client.name].get(symbol)
-                if not last_alert_time or (now - last_alert_time) > timedelta(minutes=RUN_FOMO_SCAN_EVERY_MINUTES * 4):
-                     new_alerts.append(data); recently_alerted_fomo[client.name][symbol] = now
+                # إرسال تنبيه لنفس العملة مرة كل ساعة كحد أقصى لتقليل الإزعاج
+                if not last_alert_time or (now - last_alert_time) > timedelta(minutes=60):
+                     new_alerts.append(coin)
+                     recently_alerted_fomo[client.name][symbol] = now
+                     
             if not new_alerts:
                 logger.info(f"Fomo Hunter ({client.name}): Found momentum coins, but they were alerted recently."); continue
-            sorted_coins = sorted(new_alerts, key=lambda x: x['price_change'], reverse=True)
-            message = f"🚨 **تنبيه تلقائي من صياد الفومو ({client.name})** 🚨\n\n"
-            for i, coin in enumerate(sorted_coins[:5]):
-                message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n    - السعر: `${format_price(coin['current_price'])}`\n    - **زخم آخر 30 دقيقة: `%{coin['price_change']:+.2f}`**\n\n")
+            
+            message = f"🚨 **تنبيه تلقائي من صياد الزخم ({client.name})** 🚨\n\n"
+            for i, coin in enumerate(new_alerts[:3]): # إرسال أفضل 3 فرص فقط
+                price_change_str = f"`%{coin['price_change']:.2f}`" if 'price_change' in coin else "N/A"
+                
+                message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n"
+                            f"    - **نقاط الزخم:** `{coin['score']}` ⭐\n"
+                            f"    - السعر: `${format_price(coin['current_price'])}`\n"
+                            f"    - التغير (60د): {price_change_str}\n\n")
 
             await broadcast_message(bot, message)
 
-            for coin in sorted_coins[:5]:
-                add_to_monitoring(coin['symbol'], float(coin['current_price']), coin.get('peak_volume', 0), now, f"صياد الفومو ({client.name})", client.name)
+            for coin in new_alerts[:3]:
+                add_to_monitoring(coin['symbol'], float(coin['current_price']), 0, now, f"صياد الزخم ({client.name})", client.name)
         except Exception as e:
             logger.error(f"Error in fomo_hunter_loop for {client.name}: {e}", exc_info=True)
 
@@ -1699,7 +1779,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
 # =============================================================================
 async def send_startup_message(bot: Bot):
     try:
-        message = "✅ **بوت الصياد الذكي (v28.0 - الترقية الكمّية) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت الصياد الذكي (v29.0 - زخم مطوّر) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         await broadcast_message(bot, message)
         logger.info("Startup message sent successfully to all users.")
     except Exception as e:
