@@ -217,6 +217,12 @@ SNIPER_MAX_VOLATILITY_PERCENT = 8.0
 SNIPER_BREAKOUT_VOLUME_MULTIPLIER = 4.0
 SNIPER_MIN_USDT_VOLUME = 200000
 
+# --- إعدادات صائد الجواهر (Gem Hunter Settings) ---
+GEM_MIN_CORRECTION_PERCENT = -70.0
+GEM_MIN_24H_VOLUME_USDT = 200000
+GEM_MIN_RISE_FROM_ATL_PERCENT = 50.0
+GEM_LISTING_SINCE_DATE = datetime(2024, 1, 1, tzinfo=UTC)
+
 # --- إعدادات المهام الدورية ---
 RUN_FOMO_SCAN_EVERY_MINUTES = 15
 RUN_LISTING_SCAN_EVERY_SECONDS = 60
@@ -825,6 +831,7 @@ BTN_TA_PRO = "🔬 محلل فني"
 BTN_SCALP_SCAN = "⚡️ تحليل سريع"
 BTN_PRO_SCAN = "🎯 فحص احترافي"
 BTN_SNIPER_LIST = "🔭 قائمة القنص"
+BTN_GEM_HUNTER = "💎 صائد الجواهر"
 BTN_WHALE_RADAR = "🐋 رادار الحيتان"
 BTN_MOMENTUM = "🚀 كاشف الزخم"
 BTN_STATUS = "📊 الحالة"
@@ -840,6 +847,7 @@ BTN_SELECT_KUCOIN = "KuCoin"
 BTN_SELECT_OKX = "OKX"
 BTN_TASKS_ON = "🔴 إيقاف المهام"
 BTN_TASKS_OFF = "🟢 تفعيل المهام"
+BTN_ABOUT = "ℹ️ عن البوت"
 
 def build_menu(context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
@@ -857,9 +865,10 @@ def build_menu(context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [BTN_PRO_SCAN, BTN_MOMENTUM, BTN_WHALE_RADAR],
-        [BTN_TA_PRO, BTN_SCALP_SCAN, BTN_SNIPER_LIST],
+        [BTN_TA_PRO, BTN_GEM_HUNTER, BTN_SNIPER_LIST],
         [BTN_TOP_GAINERS, BTN_TOP_VOLUME, BTN_TOP_LOSERS],
-        [BTN_PERFORMANCE, BTN_STATUS, toggle_tasks_btn],
+        [BTN_PERFORMANCE, BTN_STATUS, BTN_ABOUT],
+        [toggle_tasks_btn],
         [mexc_btn, gate_btn, binance_btn],
         [bybit_btn, kucoin_btn, okx_btn]
     ]
@@ -896,6 +905,16 @@ async def toggle_background_tasks(update: Update, context: ContextTypes.DEFAULT_
     context.bot_data['background_tasks_enabled'] = not tasks_enabled
     status = "تفعيل" if not tasks_enabled else "إيقاف"
     await update.message.reply_text(f"✅ تم **{status}** المهام الخلفية.", reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
+
+async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    about_text = (
+        "ℹ️ **عن بوت الصياد الذكي** ℹ️\n\n"
+        "هذا البوت هو أداة تحليل فني آلية ومستقلة، يقوم بتوليد إشاراته وتحليلاته الخاصة بناءً على بيانات السوق الحية من المنصات مباشرة.\n\n"
+        "**لا يأخذ البوت توصياته من أي مصدر خارجي.** وهو مصمم لتحديد الفرص بناءً على استراتيجيات محددة مسبقاً مثل اختراقات النطاقات السعرية، والزخم المفاجئ، والبحث عن العملات التي صححت بعمق.\n\n"
+        "تم تطويره ليكون مساعداً ذكياً وليس مجرد ناقل للمعلومات."
+    )
+    await update.message.reply_text(about_text, parse_mode=ParseMode.MARKDOWN)
+
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tasks_enabled = context.bot_data.get('background_tasks_enabled', True)
@@ -955,6 +974,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await show_sniper_watchlist(update, context)
         return
 
+    if button_text == BTN_ABOUT:
+        await about_command(update, context)
+        return
+
     if button_text in [BTN_SELECT_MEXC, BTN_SELECT_GATEIO, BTN_SELECT_BINANCE, BTN_SELECT_BYBIT, BTN_SELECT_KUCOIN, BTN_SELECT_OKX]:
         exchange_name = button_text
         await set_exchange(update, context, exchange_name)
@@ -985,6 +1008,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif button_text == BTN_TOP_GAINERS: task_coro = run_top_gainers(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_TOP_LOSERS: task_coro = run_top_losers(context, chat_id, sent_message.message_id, client)
     elif button_text == BTN_TOP_VOLUME: task_coro = run_top_volume(context, chat_id, sent_message.message_id, client)
+    elif button_text == BTN_GEM_HUNTER: task_coro = run_gem_hunter_scan(context, chat_id, sent_message.message_id, client)
 
     if task_coro:
         asyncio.create_task(task_coro)
@@ -1158,7 +1182,6 @@ async def run_pro_scan(context, chat_id, message_id, client: BaseExchangeClient)
             await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق.")
             return
 
-        # فلترة أولية للعملات بناءً على الحجم والسعر
         candidates = [
             p['symbol'] for p in market_data 
             if MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume', '0')) <= MOMENTUM_MAX_VOLUME_24H
@@ -1169,8 +1192,7 @@ async def run_pro_scan(context, chat_id, message_id, client: BaseExchangeClient)
             await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **الفحص الاحترافي على {client.name} اكتمل:**\n\nلا توجد عملات مرشحة ضمن نطاق السعر والحجم المطلوبين حالياً.")
             return
 
-        # تحليل كل عملة مرشحة لحساب نقاطها
-        tasks = [calculate_pro_score(client, symbol) for symbol in candidates[:100]] # حد أقصى 100 عملة للفحص
+        tasks = [calculate_pro_score(client, symbol) for symbol in candidates[:100]]
         results = await asyncio.gather(*tasks)
 
         strong_opportunities = []
@@ -1183,11 +1205,10 @@ async def run_pro_scan(context, chat_id, message_id, client: BaseExchangeClient)
             await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **الفحص الاحترافي على {client.name} اكتمل:**\n\nلم يتم العثور على فرص قوية تتجاوز حد النقاط المطلوب ({PRO_SCAN_MIN_SCORE}).")
             return
 
-        # ترتيب الفرص حسب النقاط الأعلى
         sorted_ops = sorted(strong_opportunities, key=lambda x: x['Final Score'], reverse=True)
 
         message = f"🎯 **أفضل الفرص حسب النقاط ({client.name})** 🎯\n\n"
-        for i, coin_details in enumerate(sorted_ops[:5]): # عرض أفضل 5
+        for i, coin_details in enumerate(sorted_ops[:5]):
             message += (f"**{i+1}. ${coin_details['symbol'].replace('USDT', '')}**\n"
                         f"    - **النقاط:** `{coin_details['Final Score']}` ⭐\n"
                         f"    - **السعر:** `${format_price(coin_details.get('Price', 'N/A'))}`\n"
@@ -1248,7 +1269,6 @@ async def get_performance_report(context, chat_id, message_id):
 
         message = "📊 **تقرير الأداء الشامل** 📊\n\n"
 
-        # --- قسم متتبع الأداء العام ---
         if not no_fomo_data:
             message += "📈 **أداء عملات الزخم** 📈\n\n"
             all_tracked_items = []
@@ -1275,7 +1295,6 @@ async def get_performance_report(context, chat_id, message_id):
                                 f"    - السعر الحالي: `${format_price(current_price)}` (**{current_change:+.2f}%**)\n"
                                 f"    - أعلى سعر: `${format_price(high_price)}` (**{peak_change:+.2f}%**)\n\n")
 
-        # --- قسم متتبع القناص ---
         if not no_sniper_data:
             message += "\n\n🔫 **متابعة نتائج القناص** 🔫\n\n"
             all_sniper_items = []
@@ -1299,7 +1318,6 @@ async def get_performance_report(context, chat_id, message_id):
                     f"    - **نقطة الفشل:** `{format_price(data['invalidation_price'])}`\n\n"
                 )
 
-        # --- إرسال الرسالة المقسمة ---
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
         await send_long_message(context, chat_id, message, parse_mode=ParseMode.MARKDOWN)
 
@@ -1372,6 +1390,78 @@ async def show_sniper_watchlist(update: Update, context: ContextTypes.DEFAULT_TY
         message += "لا توجد أهداف حالية في قائمة المراقبة. يقوم الرادار بالبحث..."
 
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
+async def run_gem_hunter_scan(context, chat_id, message_id, client: BaseExchangeClient):
+    """Executes the 'Hidden Gem Hunter' strategy."""
+    initial_text = f"💎 **صائد الجواهر ({client.name})**\n\n🔍 جارِ تنفيذ مسح عميق للسوق... هذه العملية قد تستغرق عدة دقائق."
+    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
+    except Exception: pass
+
+    try:
+        market_data = await client.get_market_data()
+        if not market_data:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق."); return
+        
+        volume_candidates = [c for c in market_data if float(c.get('quoteVolume', '0')) > GEM_MIN_24H_VOLUME_USDT]
+        
+        final_gems = []
+        for coin in volume_candidates:
+            symbol = coin['symbol']
+            try:
+                klines = await client.get_processed_klines(symbol, '1d', 1000) # Fetch up to ~3 years of daily data
+                if not klines or len(klines) < 10: continue
+
+                # Stage 1: Modernity Filter
+                first_candle_ts = int(klines[0][0]) / 1000
+                listing_date = datetime.fromtimestamp(first_candle_ts, tz=UTC)
+                if listing_date < GEM_LISTING_SINCE_DATE: continue
+
+                high_prices = np.array([float(k[2]) for k in klines])
+                low_prices = np.array([float(k[3]) for k in klines])
+                close_prices = np.array([float(k[4]) for k in klines])
+                
+                ath = np.max(high_prices)
+                atl = np.min(low_prices)
+                current_price = close_prices[-1]
+
+                if ath == 0 or current_price == 0: continue
+
+                # Stage 2: Deep Correction Filter
+                correction_percent = ((current_price - ath) / ath) * 100
+                if correction_percent > GEM_MIN_CORRECTION_PERCENT: continue
+
+                # Stage 4: Recovery Filter
+                rise_from_atl = ((current_price - atl) / atl) * 100 if atl > 0 else float('inf')
+                if rise_from_atl < GEM_MIN_RISE_FROM_ATL_PERCENT: continue
+                
+                if len(close_prices) >= 20 and current_price < np.mean(close_prices[-20:]): continue
+
+                # Stage 5: Potential Calculation
+                potential_x = ath / current_price
+                final_gems.append({
+                    'symbol': symbol, 'potential_x': potential_x, 'correction_percent': correction_percent
+                })
+            except Exception as e:
+                logger.warning(f"Could not process gem candidate {symbol}: {e}")
+                continue
+
+
+        if not final_gems:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **بحث الجواهر اكتمل:**\n\nلم يتم العثور على عملات تتوافق مع جميع الشروط الصارمة حالياً."); return
+
+        sorted_gems = sorted(final_gems, key=lambda x: x['potential_x'], reverse=True)
+        message = f"💎 **تقرير الجواهر المخفية ({client.name})** 💎\n\n*أفضل الفرص التي تتوافق مع استراتيجية التصحيح العميق والتعافي:*\n\n"
+        for gem in sorted_gems[:5]:
+            message += (f"**${gem['symbol'].replace('USDT', '')}**\n"
+                        f"  - 🚀 **العودة للقمة: {gem['potential_x']:.1f}X**\n"
+                        f"  - 🩸 مصححة بنسبة: {gem['correction_percent']:.1f}%\n"
+                        f"  - 📈 الحالة: تظهر بوادر تعافي\n\n")
+        
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error in run_gem_hunter_scan: {e}", exc_info=True)
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ فادح أثناء البحث عن الجواهر.")
 
 # =============================================================================
 # --- 5. المهام الآلية الدورية (تم التحديث) ---
@@ -1448,7 +1538,6 @@ async def performance_tracker_loop(session: aiohttp.ClientSession, bot: Bot):
         await asyncio.sleep(RUN_PERFORMANCE_TRACKER_EVERY_MINUTES * 60)
         now = datetime.now(UTC)
         for platform in PLATFORMS:
-            # --- تتبع الأداء العام ---
             for symbol, data in list(performance_tracker[platform].items()):
                 if now - data['alert_time'] > timedelta(hours=PERFORMANCE_TRACKING_DURATION_HOURS):
                     if performance_tracker[platform].get(symbol):
@@ -1485,7 +1574,6 @@ async def performance_tracker_loop(session: aiohttp.ClientSession, bot: Bot):
                 except Exception as e:
                     logger.error(f"Error updating price for {symbol} on {platform}: {e}")
 
-            # --- الإضافة الجديدة: تتبع نتائج القناص ---
             for symbol, data in list(sniper_tracker[platform].items()):
                 if data['status'] != 'Tracking': continue
 
@@ -1500,7 +1588,6 @@ async def performance_tracker_loop(session: aiohttp.ClientSession, bot: Bot):
                     current_price = await client.get_current_price(symbol)
                     if not current_price: continue
 
-                    # التحقق من النجاح
                     if current_price >= data['target_price']:
                         success_message = (
                             f"✅ **القناص: نجاح!** ✅\n\n"
@@ -1511,7 +1598,6 @@ async def performance_tracker_loop(session: aiohttp.ClientSession, bot: Bot):
                         logger.info(f"SNIPER TRACKER ({platform}): {symbol} SUCCEEDED.")
                         del sniper_tracker[platform][symbol]
 
-                    # التحقق من الفشل
                     elif current_price <= data['invalidation_price']:
                         failure_message = (
                             f"❌ **القناص: فشل.** ❌\n\n"
@@ -1554,15 +1640,14 @@ async def coiled_spring_radar_loop(client: BaseExchangeClient, bot_data: dict):
                 volatility = ((highest_high - lowest_low) / lowest_low) * 100
 
                 if volatility <= SNIPER_MAX_VOLATILITY_PERCENT:
-                    # --- الإضافة الجديدة: حساب وحفظ نقطة التحكم ---
                     poc = calculate_poc(klines)
-                    if not poc: return # لا يمكن المتابعة بدون POC
+                    if not poc: return
 
                     avg_volume = np.mean(volumes)
                     if symbol not in sniper_watchlist[client.name]:
                         sniper_watchlist[client.name][symbol] = {
                             'high': highest_high, 'low': lowest_low,
-                            'poc': poc, # حفظ نقطة التحكم
+                            'poc': poc,
                             'avg_volume': avg_volume, 'duration_hours': SNIPER_COMPRESSION_PERIOD_HOURS
                         }
                         logger.info(f"SNIPER RADAR ({client.name}): Added {symbol} to watchlist. POC: {poc:.8g}, Volatility: {volatility:.2f}%")
@@ -1585,26 +1670,22 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
 
         for symbol, data in watchlist_copy:
             try:
-                klines = await client.get_processed_klines(symbol, '5m', 20) # نحتاج بيانات أكثر لحساب VWAP
+                klines = await client.get_processed_klines(symbol, '5m', 20)
                 if not klines or len(klines) < 20: continue
 
                 current_price = float(klines[-1][4])
                 current_volume = float(klines[-1][5])
-
-                # --- الإضافة الجديدة: التحقق من وجود POC واستخدامه ---
                 poc = data.get('poc')
-                if not poc: continue # تخطي إذا لم يتم حساب POC
+                if not poc: continue
 
-                # حساب VWAP على إطار 5 دقائق
                 close_prices_5m = [float(k[4]) for k in klines]
                 volumes_5m = [float(k[5]) for k in klines]
                 vwap_5m = calculate_vwap(close_prices_5m, volumes_5m, period=14)
 
-                # شرط الاختراق المطور
                 is_breakout_price = current_price > data['high']
                 is_breakout_volume = current_volume > (data['avg_volume'] * SNIPER_BREAKOUT_VOLUME_MULTIPLIER)
                 is_above_vwap = vwap_5m and current_price > vwap_5m
-                is_above_poc = current_price > (poc * 1.005) # الشرط الجديد
+                is_above_poc = current_price > (poc * 1.005)
 
                 if is_breakout_price and is_breakout_volume and is_above_vwap and is_above_poc:
                     invalidation_price = data['high']
@@ -1625,7 +1706,6 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
                     await broadcast_message(bot, message)
                     logger.info(f"SNIPER TRIGGER ({client.name}): Confirmed breakout for {symbol} above POC!")
 
-                    # --- الإضافة الجديدة: بدء تتبع نتيجة الإشارة ---
                     sniper_tracker[client.name][symbol] = {
                         'alert_time': datetime.now(UTC),
                         'target_price': target_price,
@@ -1647,7 +1727,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
 # =============================================================================
 async def send_startup_message(bot: Bot):
     try:
-        message = "✅ **بوت الصياد الذكي (v23.4 - تقرير الأداء المدمج) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت الصياد الذكي (v24.2 - إصدار كامل ومصحح) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         await broadcast_message(bot, message)
         logger.info("Startup message sent successfully to all users.")
     except Exception as e:
@@ -1700,3 +1780,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
