@@ -1466,13 +1466,21 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
                 is_above_vwap = vwap_5m and current_price > vwap_5m
 
                 if is_breakout_price and is_breakout_volume and is_above_vwap:
+                    # --- الإضافة الجديدة: حساب خطة المراقبة ---
+                    invalidation_price = data['high']
+                    range_height = data['high'] - data['low']
+                    target_price = data['high'] + range_height
+
                     message = (
                         f"🎯 **تنبيه قناص: اختراق مؤكد!** 🎯\n\n"
                         f"**العملة:** `${symbol.replace('USDT', '')}` ({client.name})\n"
                         f"**النمط:** اختراق نطاق تجميعي استمر لـ {data['duration_hours']} ساعات.\n"
                         f"**سعر الاختراق:** `{format_price(current_price)}`\n"
                         f"**التأكيد:** السعر فوق VWAP وحجم التداول عالٍ.\n\n"
-                        f"*(إشارة عالية الدقة، لحظة الانطلاق المحتملة)*"
+                        f"📝 **خطة المراقبة:**\n"
+                        f"- **يفشل الاختراق بالإغلاق تحت:** `{format_price(invalidation_price)}` (قمة النطاق)\n"
+                        f"- **هدف أولي محتمل (نجاح):** `{format_price(target_price)}` (بناءً على ارتفاع النطاق)\n\n"
+                        f"*(إشارة عالية الدقة، راقب نقاط الخطة جيداً)*"
                     )
                     await broadcast_message(bot, message)
                     logger.info(f"SNIPER TRIGGER ({client.name}): Breakout detected for {symbol}!")
@@ -1490,7 +1498,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
 # =============================================================================
 async def send_startup_message(bot: Bot):
     try:
-        message = "✅ **بوت الصياد الذكي (v23.0 - التحليل المطور) متصل الآن!**\n\nأرسل /start لعرض القائمة."
+        message = "✅ **بوت الصياد الذكي (v23.1 - خطة القناص) متصل الآن!**\n\nأرسل /start لعرض القائمة."
         await broadcast_message(bot, message)
         logger.info("Startup message sent successfully to all users.")
     except Exception as e:
@@ -1543,3 +1551,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
