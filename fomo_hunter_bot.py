@@ -199,13 +199,11 @@ async def get_ai_analysis(report_data: dict, session: aiohttp.ClientSession):
         return "⚠️ لم يتم تكوين مفتاح الذكاء الاصطناعي."
 
     report_type = report_data.get("report_type")
-    prompt_template = PROMPT_TEMPLATES.get(report_type, "اشرح البيانات التالية بالتفصيل:\n{data}")
-    if "..." in prompt_template: # Fallback if template is not filled
-        prompt_template = f"You are a crypto analyst. Explain the following '{report_type}' data to a user in Arabic:\n{{data}}"
-
+    prompt_template = PROMPT_TEMPLATES.get(report_type)
+    if not prompt_template:
+        return "خطأ: لم يتم العثور على قالب لهذا التقرير."
 
     data_str = json.dumps(report_data.get("data"), indent=2, ensure_ascii=False)
-    # [NEW] تنسيق الأمر ليناسب نماذج Llama
     final_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nأنت خبير تحليل فني باللغة العربية. مهمتك هي تحليل البيانات المعطاة وتقديم شرح واضح وموجز.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{prompt_template.format(data=data_str)}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n"
     
     headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
@@ -213,17 +211,19 @@ async def get_ai_analysis(report_data: dict, session: aiohttp.ClientSession):
 
     try:
         async with session.post(HF_API_URL, headers=headers, json=payload, timeout=HTTP_TIMEOUT) as response:
-            if response.status == 429: return "عذرًا، نواجه ضغطًا عاليًا على خدمة التحليل حاليًا. يرجى المحاولة مرة أخرى بعد دقيقة."
-            if response.status == 503: return "نموذج الذكاء الاصطناعي قيد التحميل حاليًا، قد يستغرق الأمر دقيقة. يرجى المحاولة مرة أخرى."
-            response.raise_for_status()
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(f"Hugging Face API Error: Status {response.status}, Response: {error_text}")
+                if response.status == 503: return "نموذج الذكاء الاصطناعي قيد التحميل حاليًا، يرجى المحاولة مرة أخرى."
+                return f"حدث خطأ من خدمة التحليل (Status: {response.status})."
+
             result = await response.json()
-            
             if isinstance(result, list) and result:
                 return result[0].get('generated_text', "لم يتمكن الذكاء الاصطناعي من توليد رد.")
             return "استجابة غير متوقعة من خدمة التحليل."
 
     except Exception as e:
-        logger.error(f"Error calling Hugging Face API: {e}")
+        logger.error(f"Error calling Hugging Face API: {e}", exc_info=True)
         return f"حدث خطأ أثناء التواصل مع خدمة التحليل الذكي: {e}"
 
 # =============================================================================
