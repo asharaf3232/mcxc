@@ -797,8 +797,22 @@ async def analyze_order_book_for_whales(book, symbol):
     signals = []
     if not book or not book.get('bids') or not book.get('asks'): return signals
     try:
-        bids = [(float(p), float(q)) for p, q in book['bids'] if len(p)>0 and len(q)>0]
-        asks = [(float(p), float(q)) for p, q in book['asks'] if len(p)>0 and len(q)>0]
+        # [FIX] More robust parsing for order book data to prevent unpacking errors.
+        bids = []
+        for item in book.get('bids', []):
+            if isinstance(item, list) and len(item) == 2:
+                try:
+                    bids.append((float(item[0]), float(item[1])))
+                except (ValueError, TypeError):
+                    continue
+        
+        asks = []
+        for item in book.get('asks', []):
+            if isinstance(item, list) and len(item) == 2:
+                try:
+                    asks.append((float(item[0]), float(item[1])))
+                except (ValueError, TypeError):
+                    continue
 
         # 1. Wall Detection
         for price, qty in bids[:5]:
@@ -1829,3 +1843,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
