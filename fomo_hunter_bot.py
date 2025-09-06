@@ -78,6 +78,7 @@ MARKET_MOVERS_MIN_VOLUME = 50000
 HTTP_TIMEOUT = 15
 API_CONCURRENCY_LIMIT = 8
 TELEGRAM_MESSAGE_LIMIT = 4096
+# [FIXED] تم تحديث اسم النموذج إلى الإصدار الصحيح والمستقر
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
 
 # --- إعدادات تسجيل الأخطاء ---
@@ -621,10 +622,14 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     button_text = text.replace("✅ ", "")
 
     if context.user_data.get('awaiting_symbol_for_ta'):
-        symbol = text.upper(); context.user_data['awaiting_symbol_for_ta'] = False; context.args = [symbol]
+        symbol = text.upper();
+        if not symbol.endswith("USDT"): symbol += "USDT"
+        context.user_data['awaiting_symbol_for_ta'] = False; context.args = [symbol]
         await run_full_technical_analysis(update, context); return
     if context.user_data.get('awaiting_symbol_for_scalp'):
-        symbol = text.upper(); context.user_data['awaiting_symbol_for_scalp'] = False; context.args = [symbol]
+        symbol = text.upper();
+        if not symbol.endswith("USDT"): symbol += "USDT"
+        context.user_data['awaiting_symbol_for_scalp'] = False; context.args = [symbol]
         await run_scalp_analysis(update, context); return
 
     if button_text == BTN_TA_PRO:
@@ -682,7 +687,7 @@ async def get_pro_scan_data(client: BaseExchangeClient):
         try:
             klines = await client.get_processed_klines(symbol, '15m', 100)
             if not klines or len(klines) < 50: return None
-            close = np.array([float(k[4]) for k in klines]); high = np.array([float(k[2]) for k in klines]); low = np.array([float(k[3]) for k in klines]); vol = np.array([float(k[5]) for k in klines]); current = close[-1]
+            close = np.array([float(k[4]) for k in klines]); vol = np.array([float(k[5]) for k in klines]); current = close[-1]
             ema20 = np.mean(close[-20:]); ema50 = np.mean(close[-50:])
             if current > ema20 > ema50: score += 2; analysis_details['Trend'] = "Strong Up"
             elif current > ema20: score += 1; analysis_details['Trend'] = "Up"
@@ -729,7 +734,7 @@ async def get_momentum_data(client: BaseExchangeClient):
     tasks = [score_candidate(p['symbol']) for p in potential_coins[:100]]
     results = [res for res in await asyncio.gather(*tasks) if res is not None]
     momentum_coins = sorted(results, key=lambda x: x['score'], reverse=True)
-    for coin in momentum_coins: add_to_monitoring(coin['symbol'], float(coin['current_price']), 0, datetime.now(UTC), "Fomo Hunter", client.name)
+    for coin in momentum_coins: add_to_monitoring(coin['symbol'], float(coin['current_price']), "Fomo Hunter", client.name)
     return {"report_type": "MOMENTUM_SCAN", "data": momentum_coins[:5]}
 
 async def get_whale_data(client: BaseExchangeClient):
@@ -1070,6 +1075,7 @@ async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: 
                 
                 alert_price = float(confirmation_candle[4]); range_height = data['high'] - data['low']; target_price = data['high'] + range_height
                 atr_klines = await client.get_processed_klines(symbol, '15m', 15)
+                if not atr_klines: continue
                 atr_val = calculate_atr([float(k[2]) for k in atr_klines], [float(k[3]) for k in atr_klines], [float(k[4]) for k in atr_klines])
                 stop_loss = alert_price - (atr_val * SNIPER_ATR_STOP_MULTIPLIER) if atr_val else data['low']
                 
