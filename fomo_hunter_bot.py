@@ -166,14 +166,14 @@ MOMENTUM_PRICE_INCREASE = 4.0
 MOMENTUM_KLINE_INTERVAL = '5m'
 MOMENTUM_KLINE_LIMIT = 12
 MOMENTUM_MIN_SCORE = 3 # ⭐ الحد الأدنى لنقاط الزخم لإطلاق تنبيه
-# --- [FIX] Added missing variable for momentum loss calculation in performance tracker.
 MOMENTUM_LOSS_THRESHOLD_PERCENT = -10.0 # نسبة الهبوط من القمة التي تعتبر "فقدان للزخم"
 
 # --- إعدادات وحدة القناص (Sniper Module) v31 ---
 SNIPER_RADAR_RUN_EVERY_MINUTES = 30
 SNIPER_TRIGGER_RUN_EVERY_SECONDS = 60
-SNIPER_COMPRESSION_PERIOD_HOURS = 8
-SNIPER_MAX_VOLATILITY_PERCENT = 12.0 # ⭐ تمت المعايرة: زيادة الحد إلى 12% للسماح بمزيد من الفرص
+# [ADJUSTMENT] Relaxed the sniper radar filters to find more potential setups.
+SNIPER_COMPRESSION_PERIOD_HOURS = 6 # البحث عن انضغاط خلال 6 ساعات بدلاً من 8
+SNIPER_MAX_VOLATILITY_PERCENT = 18.0 # السماح بنطاق تقلب أوسع (حتى 18%)
 SNIPER_BREAKOUT_VOLUME_MULTIPLIER = 3.5 
 SNIPER_MIN_USDT_VOLUME = 200000
 SNIPER_MIN_TARGET_PERCENT = 3.0 
