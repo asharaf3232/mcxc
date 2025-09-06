@@ -78,7 +78,7 @@ MARKET_MOVERS_MIN_VOLUME = 50000
 HTTP_TIMEOUT = 15
 API_CONCURRENCY_LIMIT = 8
 TELEGRAM_MESSAGE_LIMIT = 4096
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.0-pro:generateContent?key={GEMINI_API_KEY}"
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
 
 # --- إعدادات تسجيل الأخطاء ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
