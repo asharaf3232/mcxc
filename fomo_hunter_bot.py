@@ -166,12 +166,14 @@ MOMENTUM_PRICE_INCREASE = 4.0
 MOMENTUM_KLINE_INTERVAL = '5m'
 MOMENTUM_KLINE_LIMIT = 12
 MOMENTUM_MIN_SCORE = 3 # ⭐ الحد الأدنى لنقاط الزخم لإطلاق تنبيه
+# --- [FIX] Added missing variable for momentum loss calculation in performance tracker.
+MOMENTUM_LOSS_THRESHOLD_PERCENT = -10.0 # نسبة الهبوط من القمة التي تعتبر "فقدان للزخم"
 
 # --- إعدادات وحدة القناص (Sniper Module) v31 ---
 SNIPER_RADAR_RUN_EVERY_MINUTES = 30
 SNIPER_TRIGGER_RUN_EVERY_SECONDS = 60
 SNIPER_COMPRESSION_PERIOD_HOURS = 8
-SNIPER_MAX_VOLATILITY_PERCENT = 20.0 # ⭐ تمت المعايرة: زيادة الحد إلى 12% للسماح بمزيد من الفرص
+SNIPER_MAX_VOLATILITY_PERCENT = 12.0 # ⭐ تمت المعايرة: زيادة الحد إلى 12% للسماح بمزيد من الفرص
 SNIPER_BREAKOUT_VOLUME_MULTIPLIER = 3.5 
 SNIPER_MIN_USDT_VOLUME = 200000
 SNIPER_MIN_TARGET_PERCENT = 3.0 
@@ -395,7 +397,8 @@ class GateioClient(BaseExchangeClient):
         api_interval = self.interval_map.get(interval, interval)
         async with api_semaphore:
             params = {'currency_pair': gateio_symbol, 'interval': api_interval, 'limit': limit}
-            await asyncio.sleep(0.1)
+            # [FIX] Increased delay to mitigate rate limiting
+            await asyncio.sleep(0.2)
             data = await fetch_json(self.session, f"{self.base_api_url}/spot/candlesticks", params=params)
             if not data: return None
             return [[int(k[0])*1000, k[5], k[3], k[4], k[2], k[1]] for k in data]
@@ -404,7 +407,8 @@ class GateioClient(BaseExchangeClient):
         gateio_symbol = f"{symbol[:-4]}_{symbol[-4:]}"
         async with api_semaphore:
             params = {'currency_pair': gateio_symbol, 'limit': limit}
-            await asyncio.sleep(0.1)
+            # [FIX] Increased delay to mitigate rate limiting
+            await asyncio.sleep(0.2)
             return await fetch_json(self.session, f"{self.base_api_url}/spot/order_book", params)
 
     async def get_current_price(self, symbol: str) -> float | None:
@@ -1825,4 +1829,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
