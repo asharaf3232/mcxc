@@ -25,7 +25,7 @@ from telegram.ext import (
 # =============================================================================
 
 # --- Telegram Configuration ---
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 # [CRITICAL] ضع مفتاح Gemini API الخاص بك هنا
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'PASTE_YOUR_GEMINI_API_KEY_HERE')
 DATABASE_FILE = "users_v33.db"
@@ -79,7 +79,7 @@ HTTP_TIMEOUT = 15
 API_CONCURRENCY_LIMIT = 8
 TELEGRAM_MESSAGE_LIMIT = 4096
 # [FIXED] تم تحديث اسم النموذج إلى الإصدار الصحيح والمستقر
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-preview-05-20:generateContent?key={GEMINI_API_KEY}"
 
 # --- إعدادات تسجيل الأخطاء ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -1167,12 +1167,17 @@ async def post_init(application: Application):
     await send_startup_message(bot)
 
 async def send_startup_message(bot: Bot):
-    await broadcast_message(bot, "✅ **بوت الصياد الذكي (v33.0 - النسخة الكاملة) متصل الآن!**\n\nأرسل /start لعرض القائمة.")
+    await broadcast_message(bot, "✅ **بوت الصياد الذكي (v33.1 - إصلاح حاسم) متصل الآن!**\n\nأرسل /start لعرض القائمة.")
     logger.info("Startup message sent successfully to all users.")
     
 def main():
-    if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN: logger.critical("FATAL ERROR: Bot token is not set."); return
-    if 'PASTE_YOUR' in GEMINI_API_KEY: logger.critical("FATAL ERROR: Gemini API Key is not set."); return
+    if not TELEGRAM_BOT_TOKEN or 'YOUR_TELEGRAM_BOT_TOKEN' in TELEGRAM_BOT_TOKEN: 
+        logger.critical("FATAL ERROR: Bot token is not set.")
+        return
+    if not GEMINI_API_KEY or 'PASTE_YOUR_GEMINI_API_KEY_HERE' in GEMINI_API_KEY: 
+        logger.critical("FATAL ERROR: Gemini API Key is not set.")
+        return
+        
     setup_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.bot_data['background_tasks_enabled'] = True
