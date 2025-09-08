@@ -1,15 +1,12 @@
 # -*- coding: utf-8 -*-
 # ======================================================================================================================
-# == Hybrid Hunter Bot v2.0 | The Professional Version ===============================================================
+# == Hybrid Hunter Bot v2.1 | The Professional Version ===============================================================
 # ======================================================================================================================
 #
-# v2.0 "الاحترافي الكامل" Changelog:
-# - FEATURE COMPLETE: Implemented the "Active Trades" feature. It now fetches and displays all open trades with live PnL.
-# - CRITICAL FIX: Ported robust analysis logic from the original bot for "Technical Analysis" and "Scalp Analysis". They are now powerful and fully functional.
-# - CRITICAL FIX: Resolved the underlying bug causing manual scans (especially Whale Radar) to fail. All manual scans are now stable.
-# - NEW FEATURE: Added a comprehensive "Diagnostic Report" (Debugger Mode) to provide deep insights into the bot's internal state.
-# - IMPROVEMENT: Scalp analysis now provides more insightful data and a summary score.
-# - STABILITY: Overall stability improvements and refined user interaction flows.
+# v2.1 "إصلاحات دقيقة وتحسينات" Changelog:
+# - CRITICAL FIX (Trade Tracking): تم إصلاح الخلل الجذري الذي كان يمنع نظام متابعة الصفقات من العمل. سيقوم البوت الآن بمراقبة وقف الخسارة (SL) وجني الأرباح (TP) بشكل صحيح وإرسال إشعارات فورية عند تحقيق أي منهما.
+# - IMPROVEMENT (Scalp Analysis): تم تطوير "التحليل السريع" بشكل كبير. أصبح الآن يعرض مؤشرات إضافية مهمة مثل اتجاه EMA ومستوى التقلب (ATR)، مع ملخص أكثر وضوحًا وقابلية للتنفيذ.
+# - STABILITY: إضافة المزيد من سجلات التشخيص (Logs) لتسهيل تتبع أداء نظام المتابعة.
 #
 # ======================================================================================================================
 
@@ -533,12 +530,20 @@ async def track_active_trades(context: ContextTypes.DEFAULT_TYPE):
 
     for trade_row in active_trades:
         trade = dict(trade_row)
-        exchange = bot_state["exchanges"].get(trade['exchange'].lower())
-        if not exchange: continue
+        # CRITICAL FIX: The lookup key for the exchange was incorrect. It should be capitalized.
+        exchange = bot_state["exchanges"].get(trade['exchange'])
+        if not exchange:
+            logger.warning(f"Could not find active exchange '{trade['exchange']}' for trade #{trade['id']}. Skipping.")
+            continue
 
         current_price = await get_current_price(exchange, trade['symbol'])
-        if not current_price: continue
+        if not current_price:
+            logger.warning(f"Could not fetch price for {trade['symbol']} on {trade['exchange']} for tracking.")
+            continue
+            
+        logger.info(f"Tracking #{trade['id']} ({trade['symbol']}): Price={current_price:.4f}, TP={trade['take_profit']:.4f}, SL={trade['current_stop_loss']:.4f}")
 
+        # Check for TP/SL triggers
         if current_price >= trade['take_profit']:
             await close_trade(context.bot, trade, current_price, 'Take Profit Hit')
             continue
@@ -546,19 +551,23 @@ async def track_active_trades(context: ContextTypes.DEFAULT_TYPE):
             await close_trade(context.bot, trade, current_price, 'Stop Loss Hit')
             continue
 
+        # Trailing Stop Loss Logic
         if settings["use_trailing_sl"]:
             highest_price = max(trade['highest_price'], current_price)
             if not trade['trailing_sl_active']:
+                # Activate TSL
                 activation_price = trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100)
                 if current_price >= activation_price:
-                    new_stop_loss = trade['entry_price']
+                    new_stop_loss = trade['entry_price'] # Move SL to entry
                     if new_stop_loss > trade['current_stop_loss']:
                          await update_trade_sl(context.bot, trade['id'], new_stop_loss, highest_price, is_activation=True)
             else:
+                # Update active TSL
                 new_stop_loss = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
                 if new_stop_loss > trade['current_stop_loss']:
                     await update_trade_sl(context.bot, trade['id'], new_stop_loss, highest_price)
             
+            # Update peak price if it has increased
             if highest_price > trade['highest_price']:
                  await update_trade_peak_price(trade['id'], highest_price)
 
@@ -686,6 +695,7 @@ async def run_full_technical_analysis(update: Update, context: ContextTypes.DEFA
         await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ أثناء تحليل {symbol}. تأكد من صحة الرمز.")
 
 async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """[IMPROVED] Provides a more detailed scalp analysis."""
     chat_id = update.message.chat_id
     try:
         symbol = context.args[0].upper()
@@ -701,47 +711,61 @@ async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"لم يتم العثور على منصة {ex_id}.")
         return
 
-    sent_message = await context.bot.send_message(chat_id=chat_id, text=f"⚡️ جارِ إجراء تحليل سريع لـ ${symbol} على {exchange.id}...")
+    sent_message = await context.bot.send_message(chat_id=chat_id, text=f"⚡️ جارِ إجراء تحليل سريع ومطور لـ ${symbol} على {exchange.id}...")
 
     try:
         timeframes = {'15 دقيقة': '15m', '5 دقائق': '5m'}
-        report_parts = [f"⚡️ **التحليل السريع لـ ${symbol}** ({exchange.id})\n\n"]
-        overall_score = 0
+        report_parts = [f"⚡️ **التحليل السريع المطور لـ ${symbol}** ({exchange.id})\n"]
+        final_summary_points = []
 
         for tf_name, tf_interval in timeframes.items():
             ohlcv = await safe_fetch_ohlcv(exchange, symbol, tf_interval, 50)
-            tf_report = f"--- **إطار {tf_name}** ---\n"
+            tf_report = f"\n--- **إطار {tf_name}** ---\n"
             if not ohlcv or len(ohlcv) < 20:
                 tf_report += "لا توجد بيانات كافية.\n\n"
                 report_parts.append(tf_report)
                 continue
 
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            current_price = df['close'].iloc[-1]
             
+            # Volume analysis
             avg_volume = df['volume'][-20:-1].mean()
             last_volume = df['volume'].iloc[-1]
-            if avg_volume > 0:
-                vol_ratio = last_volume / avg_volume
-                if vol_ratio > 3: 
-                    tf_report += f"🟢 **الفوليوم:** عالٍ جداً ({vol_ratio:.1f}x).\n"; overall_score += 2
-                elif vol_ratio > 1.5:
-                    tf_report += f"🟢 **الفوليوم:** جيد ({vol_ratio:.1f}x).\n"; overall_score += 1
-                else: 
-                    tf_report += "🟡 **الفوليوم:** عادي.\n"
-
-            price_change = ((df['close'].iloc[-1] - df['close'].iloc[-5]) / df['close'].iloc[-5]) * 100 if df['close'].iloc[-5] > 0 else 0
-            if price_change > 1.5: 
-                tf_report += f"🟢 **السعر:** حركة صاعدة قوية (`%{price_change:+.1f}`).\n"; overall_score +=1
-            elif price_change < -1.5: 
-                tf_report += f"🔴 **السعر:** حركة هابطة قوية (`%{price_change:+.1f}`).\n"; overall_score -=1
+            vol_ratio = last_volume / avg_volume if avg_volume > 0 else 0
+            if vol_ratio > 2.0:
+                tf_report += f"🟢 **الفوليوم:** عالٍ ({vol_ratio:.1f}x).\n"
+                if tf_interval == '5m': final_summary_points.append("فوليوم عالٍ على 5 دقائق")
             else: 
-                tf_report += "🟡 **السعر:** حركة عادية.\n"
+                tf_report += f"🟡 **الفوليوم:** عادي.\n"
+
+            # Short-term trend analysis
+            ema9 = ta.ema(df['close'], length=9).iloc[-1]
+            if current_price > ema9:
+                tf_report += f"🟢 **الاتجاه القصير:** إيجابي (فوق EMA9).\n"
+                if tf_interval == '5m': final_summary_points.append("اتجاه إيجابي قصير")
+            else:
+                tf_report += f"🔴 **الاتجاه القصير:** سلبي (تحت EMA9).\n"
+            
+            # Volatility analysis
+            atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
+            atr_percent = (atr / current_price) * 100
+            if atr_percent > 0.5:
+                 tf_report += f"🟢 **التقلب (ATR):** جيد للمضاربة ({atr_percent:.2f}%).\n"
+                 if tf_interval == '5m': final_summary_points.append("تقلب جيد")
+            else:
+                 tf_report += f"🟡 **التقلب (ATR):** ضعيف ({atr_percent:.2f}%).\n"
+
             report_parts.append(tf_report)
         
-        summary = "--- **الخلاصة** ---\n"
-        if overall_score >= 4: summary += "🟢 **زخم قوي جداً، مناسب للمتابعة.**"
-        elif overall_score >= 2: summary += "🟢 **زخم جيد.**"
-        else: summary += "🟡 **زخم عادي أو ضعيف حالياً.**"
+        # Final Summary
+        summary = "\n--- **الخلاصة** ---\n"
+        if "فوليوم عالٍ على 5 دقائق" in final_summary_points and "اتجاه إيجابي قصير" in final_summary_points:
+            summary += "🟢 **زخم صاعد قوي،** قد تكون مناسبة للمراقبة والدخول السريع."
+        elif "اتجاه إيجابي قصير" in final_summary_points:
+            summary += "🟡 **إيجابية نسبية،** لكن تحتاج تأكيد من الفوليوم."
+        else:
+            summary += "🔴 **لا يوجد زخم واضح حالياً،** يفضل الانتظار."
         report_parts.append(summary)
 
         await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text="".join(report_parts), parse_mode=ParseMode.MARKDOWN)
@@ -749,6 +773,7 @@ async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         logger.error(f"Error in scalp analysis for {symbol}: {e}")
         await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ أثناء تحليل {symbol}.")
+
 
 async def run_gem_hunter_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """[UPGRADED] Scans all connected exchanges for potential gems."""
@@ -956,8 +981,8 @@ settings_menu_keyboard = [
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر البدء."""
     welcome_message = (
-        "أهلاً بك في **بوت الصياد الهجين v1.9 (الإصدار الاحترافي)**!\n\n"
-        "تم إصلاح جميع الأخطاء السابقة وتفعيل كافة الميزات المعلقة."
+        "أهلاً بك في **بوت الصياد الهجين v2.1 (الإصدار الاحترافي)**!\n\n"
+        "تم تطبيق إصلاحات وتحسينات بناءً على ملاحظاتك."
     )
     context.user_data.setdefault('active_manual_exchange', 'Binance')
     context.user_data.setdefault('next_step', None)
@@ -1075,7 +1100,7 @@ async def active_trades_command(update: Update, context: ContextTypes.DEFAULT_TY
         message_parts = ["📈 **تقرير الصفقات النشطة** 📈\n\n"]
         for trade_row in active_trades:
             trade = dict(trade_row)
-            exchange = bot_state["exchanges"].get(trade['exchange'].lower())
+            exchange = bot_state["exchanges"].get(trade['exchange']) # Corrected lookup
             current_price_str = "N/A"
             pnl_str = ""
 
@@ -1267,7 +1292,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(perform_scan_and_trade, interval=timedelta(minutes=SCAN_INTERVAL_MINUTES), first=10, name='main_scan')
     job_queue.run_repeating(track_active_trades, interval=timedelta(minutes=TRACK_INTERVAL_MINUTES), first=20, name='trade_tracker')
     
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v1.9 متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v2.1 متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
     logger.info("Bot is fully initialized and background jobs are scheduled.")
 
 async def post_shutdown(application: Application):
@@ -1303,9 +1328,8 @@ def main() -> None:
 
     application.add_error_handler(error_handler)
 
-    logger.info("Starting Hybrid Hunter Bot v1.9...")
+    logger.info("Starting Hybrid Hunter Bot v2.1...")
     application.run_polling()
 
 if __name__ == '__main__':
     main()
-
