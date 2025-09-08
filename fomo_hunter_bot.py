@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ======================================================================================================================
-# == Hybrid Hunter Bot v2.3 | The Professional Version ===============================================================
+# == Hybrid Hunter Bot v2.4 | The Professional Version ===============================================================
 # ======================================================================================================================
 #
-# v2.3 "تحسينات واجهة المستخدم والأداء" Changelog:
-# - NEW FEATURE (Task Locking): تم إضافة نظام قفل يمنع تشغيل أي أمر جديد (مثل الفحوصات اليدوية) إذا كان هناك أمر آخر قيد التنفيذ، مع إظهار رسالة انتظار للمستخدم.
-# - IMPROVEMENT (Gem Hunter): تم تسريع "صائد الجواهر" بشكل كبير، حيث أصبح الآن يبحث في المنصة المحددة يدويًا فقط بدلاً من جميع المنصات.
-# - IMPROVEMENT (UI): تم دمج أزرار "الأعلى ربحاً"، "الأعلى خسارة"، و"الأعلى تداولاً" في زر واحد جديد "📊 ملخص السوق" لتقديم تقرير شامل وواجهة أنظف.
-# - STABILITY: زيادة حد الصفقات المتزامنة الافتراضي.
+# v2.4 "إصلاحات جذرية" Changelog:
+# - CRITICAL FIX (Task Locking): تم إصلاح الخلل الذي كان يمنع نظام قفل المهام من العمل. الآن سيتم منع تشغيل الأوامر المتزامنة بشكل صحيح وستظهر رسالة الانتظار.
+# - CRITICAL FIX (Pro Scan): تم إصلاح الخطأ الفادح الذي كان يسبب تعطل "الفحص الاحترافي". أصبح الأمر الآن يعمل بثبات.
+# - CRITICAL FIX (Trade Tracking): تم إصلاح مشكلة ظهور "N/A" لسعر الصفقات من منصات غير Binance (مثل Mexc). سيتم الآن جلب جميع الأسعار بشكل صحيح.
+# - STABILITY: تحسينات عامة في معالجة الأخطاء.
 #
 # ======================================================================================================================
 
@@ -489,6 +489,9 @@ async def process_new_signal(bot, exchange: ccxt.Exchange, symbol: str, signal: 
     settings = bot_state["settings"]
     entry_price = signal['entry_price']
     
+    # FIX: Find the correctly capitalized exchange name to store in DB
+    exchange_name_to_store = next((p for p in PLATFORMS if p.lower() == exchange.id.lower()), exchange.id.capitalize())
+
     try:
         ohlcv = await safe_fetch_ohlcv(exchange, symbol, '15m', 20)
         if not ohlcv: return
@@ -510,7 +513,7 @@ async def process_new_signal(bot, exchange: ccxt.Exchange, symbol: str, signal: 
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-            exchange.id.capitalize(), symbol, signal['strategy'], entry_price, stop_loss, stop_loss, take_profit,
+            exchange_name_to_store, symbol, signal['strategy'], entry_price, stop_loss, stop_loss, take_profit,
             settings['virtual_trade_size_usdt'], 'Active', entry_price
         ))
         trade_id = cursor.lastrowid
@@ -520,7 +523,7 @@ async def process_new_signal(bot, exchange: ccxt.Exchange, symbol: str, signal: 
         message = (
             f"🎯 **توصية صفقة جديدة** 🎯\n\n"
             f"▫️ **العملة:** `{symbol}`\n"
-            f"▫️ **المنصة:** *{exchange.id.capitalize()}*\n"
+            f"▫️ **المنصة:** *{exchange_name_to_store}*\n"
             f"▫️ **الاستراتيجية:** `{signal['strategy']}`\n"
             f"━━━━━━━━━━━━━━\n"
             f"📈 **سعر الدخول:** `{format_price(entry_price)}`\n"
@@ -529,7 +532,7 @@ async def process_new_signal(bot, exchange: ccxt.Exchange, symbol: str, signal: 
             f"*ID: {trade_id}*"
         )
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
-        logger.info(f"Successfully processed and sent signal for {symbol} (ID: {trade_id})")
+        logger.info(f"Successfully processed and sent signal for {symbol} (ID: {trade_id}) on {exchange_name_to_store}")
 
     except Exception as e:
         logger.error(f"Failed to process signal for {symbol}: {e}")
@@ -574,7 +577,7 @@ async def track_active_trades(context: ContextTypes.DEFAULT_TYPE):
 
         # Trailing Stop Loss Logic
         if settings["use_trailing_sl"]:
-            highest_price = max(trade['highest_price'], current_price)
+            highest_price = max(trade.get('highest_price', current_price), current_price)
             if not trade['trailing_sl_active']:
                 # Activate TSL
                 activation_price = trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100)
@@ -589,7 +592,7 @@ async def track_active_trades(context: ContextTypes.DEFAULT_TYPE):
                     await update_trade_sl(context.bot, trade['id'], new_stop_loss, highest_price)
             
             # Update peak price if it has increased
-            if highest_price > trade['highest_price']:
+            if highest_price > trade.get('highest_price', 0):
                  await update_trade_peak_price(trade['id'], highest_price)
 
 async def close_trade(bot, trade: Dict, exit_price: float, reason: str):
@@ -919,16 +922,11 @@ async def run_market_summary_command(update: Update, context: ContextTypes.DEFAU
 
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
-@user_task_lock
-async def calculate_pro_score(exchange: ccxt.Exchange, symbol: str) -> Optional[Dict]:
-    """Calculates a technical score for a given symbol."""
-    score = 0
-    analysis = {'symbol': symbol}
+def calculate_pro_score(df: pd.DataFrame) -> Optional[Dict]:
+    """Calculates a technical score from a given dataframe."""
     try:
-        ohlcv = await safe_fetch_ohlcv(exchange, symbol, '15m', 100)
-        if not ohlcv or len(ohlcv) < 50: return None
-
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        score = 0
+        analysis = {}
         current_price = df['close'].iloc[-1]
 
         ema20 = ta.ema(df['close'], length=20).iloc[-1]
@@ -971,11 +969,17 @@ async def run_pro_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tickers = await exchange.fetch_tickers()
         candidates = [s for s, t in tickers.items() if s.endswith('/USDT') and not is_symbol_unwanted(s) and t.get('quoteVolume', 0) > 500000]
 
-        tasks = [calculate_pro_score(exchange, symbol) for symbol in candidates[:150]]
-        results = await asyncio.gather(*tasks)
-        
-        min_score = bot_state["settings"]["pro_scan_min_score"]
-        strong_opportunities = [res for res in results if res and res.get('Score', 0) >= min_score]
+        strong_opportunities = []
+        for symbol in candidates[:150]: # Limit for performance
+             await asyncio.sleep(exchange.rateLimit / 2000)
+             ohlcv = await safe_fetch_ohlcv(exchange, symbol, '15m', 100)
+             if not ohlcv or len(ohlcv) < 50: continue
+             
+             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+             result = calculate_pro_score(df)
+             if result and result.get('Score', 0) >= bot_state["settings"]["pro_scan_min_score"]:
+                 result['symbol'] = symbol
+                 strong_opportunities.append(result)
 
         if not strong_opportunities:
             await update.message.reply_text(f"✅ **الفحص الاحترافي اكتمل:** لم يتم العثور على فرص قوية حالياً على {ex_id}.")
@@ -1021,7 +1025,7 @@ settings_menu_keyboard = [
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر البدء."""
     welcome_message = (
-        "أهلاً بك في **بوت الصياد الهجين v2.3 (إصدار تحسينات الأداء)**!\n\n"
+        "أهلاً بك في **بوت الصياد الهجين v2.4 (إصلاحات جذرية)**!\n\n"
         "تم تطبيق تطويرات جديدة بناءً على طلباتك."
     )
     context.user_data.setdefault('active_manual_exchange', 'Binance')
@@ -1347,7 +1351,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(perform_scan_and_trade, interval=timedelta(minutes=SCAN_INTERVAL_MINUTES), first=10, name='main_scan')
     job_queue.run_repeating(track_active_trades, interval=timedelta(minutes=TRACK_INTERVAL_MINUTES), first=20, name='trade_tracker')
     
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v2.3 متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v2.4 متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
     logger.info("Bot is fully initialized and background jobs are scheduled.")
 
 async def post_shutdown(application: Application):
@@ -1383,8 +1387,9 @@ def main() -> None:
 
     application.add_error_handler(error_handler)
 
-    logger.info("Starting Hybrid Hunter Bot v2.3...")
+    logger.info("Starting Hybrid Hunter Bot v2.4...")
     application.run_polling()
 
 if __name__ == '__main__':
     main()
+
