@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 # ======================================================================================================================
-# == Hybrid Hunter Bot v3.1 | The All-Seeing Version (Fixed) =========================================================
+# == Hybrid Hunter Bot v3.3 | Elite Upgrade ==========================================================================
 # ======================================================================================================================
 #
-# v3.1 "إصلاح معالج الأوامر" Changelog:
-# - CRITICAL FIX (Conversation Handler): تم إصلاح الخلل الذي كان يمنع زر "الإعدادات المتقدمة" من الاستجابة.
-#   تمت إعادة هيكلة أولويات معالجات الأوامر لضمان بدء المحادثات بشكل صحيح.
-# - RETAINED (Detailed Alerts): تم الإبقاء على رسائل إغلاق الصفقات المفصلة والشاملة.
-# - RETAINED (New Listings Monitor): ميزة مراقبة الإدراجات الجديدة تعمل بكامل طاقتها.
+# v3.3 "الترقية إلى مستوى النخبة" Changelog:
+# - ENHANCEMENT: تم تحديث `get_master_trend` ليصبح أكثر ذكاءً.
+#   - يستخدم الآن تقاطع متوسطين متحركين (EMA 21 و SMA 50) بدلاً من متوسط واحد.
+#   - يدمج مؤشر الخوف والطمع (Fear & Greed Index) من مصدر خارجي للحصول على رؤية أوسع للسوق.
+# - NEW LIBRARY: تمت إضافة مكتبة `requests` لجلب بيانات مؤشر الخوف والطمع. تأكد من إضافتها إلى `requirements.txt`.
+# - MINOR FIX: تم تعديل وظيفة `find_support_resistance` لتكون أكثر استقراراً في حالة عدم وجود مستويات.
 #
 # ======================================================================================================================
 
@@ -28,6 +29,7 @@ import ccxt.async_support as ccxt
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
+import requests # <-- مكتبة جديدة
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, BadRequest
@@ -46,13 +48,18 @@ from telegram.ext import (
 # =============================================================================
 
 # --- إعدادات التليجرام والملفات ---
+# IMPORTANT: Make sure these are set as Environment Variables in your hosting platform (e.g., Railway)
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID')
 
-DATABASE_FILE = "hybrid_hunter.db"
-SETTINGS_FILE = "hybrid_settings.json"
-LOG_FILE = "hybrid_hunter.log"
+# The bot will create these files in the persistent storage volume
+DATABASE_FILE = "data/hybrid_hunter.db"
+SETTINGS_FILE = "data/hybrid_settings.json"
+LOG_FILE = "data/hybrid_hunter.log"
 
+# --- Create data directory if it doesn't exist ---
+if not os.path.exists('data'):
+    os.makedirs('data')
 
 # --- إعداد مسجل الأحداث (Logger) ---
 logging.basicConfig(
@@ -62,6 +69,7 @@ logging.basicConfig(
 )
 logging.getLogger('ccxt').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
+logging.getLogger('requests').setLevel(logging.WARNING) # Mute requests library logs
 logger = logging.getLogger(__name__)
 
 # --- إعدادات البوت العامة ---
@@ -101,7 +109,7 @@ DEFAULT_SETTINGS = {
     "trade_size_percent": 2.0,
     "use_master_trend_filter": True,
     "master_trend_tf": "4h",
-    "master_trend_ma": 50,
+    # master_trend_ma is now obsolete, replaced by EMA/SMA crossover logic
     "use_trailing_sl": True,
     "trailing_sl_activation_percent": 1.5,
     "trailing_sl_callback_percent": 1.0,
@@ -115,6 +123,7 @@ DEFAULT_SETTINGS = {
     "gem_min_rise_from_atl_percent": 50.0,
     "gem_listing_since_days": 365,
     "pro_scan_min_score": 5,
+    "fear_and_greed_threshold": 30, # New setting: Don't scan if F&G index is below this value
 }
 
 # --- متغيرات الحالة العامة ---
@@ -347,7 +356,8 @@ def find_support_resistance(high_prices, low_prices, window=10):
             else:
                 clustered.append(np.mean(current_cluster))
                 current_cluster = [level]
-        clustered.append(np.mean(current_cluster))
+        if current_cluster: # <-- Add check to avoid error on empty list
+            clustered.append(np.mean(current_cluster))
         return clustered
 
     return cluster_levels(supports), cluster_levels(resistances)
@@ -436,23 +446,68 @@ async def pre_scan_filter(exchange: ccxt.Exchange) -> List[Dict]:
     logger.info(f"[{exchange.id}] Pre-scan complete. Found {len(final_candidates)} high-quality candidates.")
     return final_candidates
 
-async def get_master_trend(exchange: ccxt.Exchange) -> bool:
-    """يحدد الاتجاه العام للسوق من خلال تحليل BTC/USDT."""
-    settings = bot_state["settings"]
+def get_fear_and_greed_index() -> Optional[Dict]:
+    """Fetches the latest Fear and Greed Index data."""
     try:
-        ohlcv = await fetch_ohlcv_cached(exchange, 'BTC/USDT', settings["master_trend_tf"], settings["master_trend_ma"] + 5)
-        if not ohlcv: return True
+        response = requests.get("https://api.alternative.me/fng/?limit=1")
+        response.raise_for_status()
+        data = response.json().get('data', [])
+        if data:
+            return {
+                "value": int(data[0]['value']),
+                "classification": data[0]['value_classification']
+            }
+    except Exception as e:
+        logger.error(f"Could not fetch Fear and Greed Index: {e}")
+    return None
+
+async def get_master_trend(exchange: ccxt.Exchange) -> bool:
+    """
+    يحدد الاتجاه العام للسوق من خلال تحليل BTC/USDT وتقييم مشاعر السوق.
+    - فني: يستخدم تقاطع EMA 21 و SMA 50 على إطار 4 ساعات.
+    - مشاعر: يستخدم مؤشر الخوف والطمع.
+    """
+    settings = bot_state["settings"]
+    tf = settings.get("master_trend_tf", "4h")
+    fng_threshold = settings.get("fear_and_greed_threshold", 30)
+
+    try:
+        # 1. التحليل الفني للبيتكوين
+        ohlcv = await fetch_ohlcv_cached(exchange, 'BTC/USDT', tf, 55)
+        if not ohlcv: return True # Fail safe: assume bullish if data fails
 
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        sma = ta.sma(df['close'], length=settings["master_trend_ma"]).iloc[-1]
+        ema21 = ta.ema(df['close'], length=21).iloc[-1]
+        sma50 = ta.sma(df['close'], length=50).iloc[-1]
         current_price = df['close'].iloc[-1]
+        
+        is_technically_bullish = (current_price > ema21) and (ema21 > sma50)
 
-        is_bullish = current_price > sma
-        logger.info(f"Master Trend (BTC/{settings['master_trend_tf']}): {'BULLISH' if is_bullish else 'BEARISH'} (Price: {current_price:.0f}, SMA{settings['master_trend_ma']}: {sma:.0f})")
-        return is_bullish
+        # 2. تحليل مشاعر السوق
+        fng_data = get_fear_and_greed_index()
+        is_sentiment_bullish = True # Default to true if API fails
+        fng_value = "N/A"
+        if fng_data:
+            fng_value = fng_data['value']
+            if fng_value < fng_threshold:
+                is_sentiment_bullish = False
+
+        # 3. القرار النهائي
+        is_market_bullish = is_technically_bullish and is_sentiment_bullish
+        
+        tech_status = "BULLISH" if is_technically_bullish else "BEARISH"
+        senti_status = "OK" if is_sentiment_bullish else "FEAR"
+        
+        logger.info(
+            f"Master Trend ({tf}): Final decision is {'BULLISH' if is_market_bullish else 'BEARISH'}. "
+            f"Reason: Technicals are {tech_status} (Price: {current_price:.0f}, EMA21: {ema21:.0f}, SMA50: {sma50:.0f}), "
+            f"Sentiment is {senti_status} (F&G Index: {fng_value})"
+        )
+        return is_market_bullish
+
     except Exception as e:
         logger.error(f"Failed to get master trend: {e}")
-        return True
+        return True # Fail safe
 
 # =============================================================================
 # --- 🎯 6. محركات الاستراتيجيات الهجينة 🎯 ---
@@ -745,7 +800,6 @@ async def close_trade(bot, trade: Dict, exit_price: float, reason: str):
 
     duration_str = "N/A"
     try:
-        # Use timezone-aware datetime objects for calculation
         entry_time = datetime.strptime(trade['timestamp'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
         close_time = datetime.now(timezone.utc)
         duration = close_time - entry_time
@@ -1275,8 +1329,8 @@ settings_menu_keyboard = [
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر البدء."""
     welcome_message = (
-        "أهلاً بك في **بوت الصياد الهجين v3.1 (نسخة مراقب الإدراجات)**!\n\n"
-        "تمت إضافة ميزة مراقبة الإدراجات الجديدة. أنا أراقب السوق من أجلك!"
+        "أهلاً بك في **بوت الصياد الهجين v3.3 (نسخة النخبة)**!\n\n"
+        "تم تحسين منطق تحليل اتجاه السوق العام لقرارات أكثر دقة."
     )
     context.user_data.setdefault('active_manual_exchange', 'Binance')
     context.user_data.setdefault('next_step', None)
@@ -1504,7 +1558,8 @@ EDITABLE_SETTINGS = {
     "risk_reward_ratio": {"name": "نسبة المخاطرة/العائد", "type": float},
     "trade_size_percent": {"name": "حجم الصفقة (%)", "type": float},
     "whale_wall_threshold_usdt": {"name": "حد جدار الحيتان (USDT)", "type": int},
-    "pro_scan_min_score": {"name": "الحد الأدنى لنقاط الفحص الاحترافي", "type": int}
+    "pro_scan_min_score": {"name": "الحد الأدنى لنقاط الفحص الاحترافي", "type": int},
+    "fear_and_greed_threshold": {"name": "حد مؤشر الخوف (لا تفحص إذا كان أقل)", "type": int},
 }
 
 async def advanced_settings_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1515,7 +1570,6 @@ async def advanced_settings_start(update: Update, context: ContextTypes.DEFAULT_
         keyboard.append([InlineKeyboardButton(f"{val['name']}: {current_value}", callback_data=f"edit_{key}")])
     keyboard.append([InlineKeyboardButton("🔙 إنهاء وإغلاق", callback_data="exit_settings")])
 
-    # Check if the message is from a query or a new message
     if update.callback_query:
         await update.callback_query.edit_message_text(
             "⚙️ **الإعدادات المتقدمة** ⚙️\n\nاختر الإعداد الذي تريد تعديله:",
@@ -1634,10 +1688,10 @@ async def send_periodic_summary(context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         binance_exchange = bot_state["exchanges"].get("Binance")
-        btc_trend = "غير متاح"
+        btc_trend_summary = "غير متاح"
         if binance_exchange:
              is_bullish = await get_master_trend(binance_exchange)
-             btc_trend = "صاعد 🟢" if is_bullish else "هابط 🔴"
+             btc_trend_summary = "صاعد 🟢" if is_bullish else "هابط 🔴"
 
         scan_status = "تعمل" if not bot_state.get("scan_in_progress") else "قيد التشغيل حالياً"
 
@@ -1645,7 +1699,7 @@ async def send_periodic_summary(context: ContextTypes.DEFAULT_TYPE):
             f"**ℹ️ ملخص حالة البوت الدوري ℹ️**\n\n"
             f"- **حالة الفحص:** `{scan_status}`\n"
             f"- **الصفقات النشطة:** `{active_trades_count}`\n"
-            f"- **اتجاه السوق العام (BTC):** *{btc_trend}*\n\n"
+            f"- **اتجاه السوق العام (BTC):** *{btc_trend_summary}*\n\n"
             f"أنا أعمل في الخلفية وأبحث عن الفرص."
         )
         await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
@@ -1675,7 +1729,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(send_periodic_summary, interval=timedelta(hours=SUMMARY_INTERVAL_HOURS), first=60, name='periodic_summary')
     job_queue.run_repeating(periodic_listings_check, interval=timedelta(minutes=LISTINGS_CHECK_INTERVAL_MINUTES), first=45, name='new_listings_checker')
 
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v3.1 (نسخة مصححة) متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v3.3 (نسخة النخبة) متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
     logger.info("Bot is fully initialized and background jobs are scheduled.")
 
 async def post_shutdown(application: Application):
@@ -1709,32 +1763,22 @@ def main() -> None:
         },
         fallbacks=[CommandHandler('cancel', end_settings_conversation),
                    CallbackQueryHandler(end_settings_conversation, pattern='^exit_settings$')],
-        # per_message=False ensures that if the user clicks the button multiple times, it doesn't create multiple conversations
         per_message=False 
     )
 
-    # Add handlers with correct priority. Handlers with lower group number are processed first.
-    # Group 0: Conversation Handler (highest priority for text messages)
     application.add_handler(conv_handler, group=0)
-
-    # Group 1: Command Handlers
     application.add_handler(CommandHandler("start", start_command), group=1)
     application.add_handler(CommandHandler("ta", run_full_technical_analysis), group=1)
     application.add_handler(CommandHandler("scalp", run_scalp_analysis), group=1)
-
-    # Group 2: Regular Text Message Handlers (for buttons)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message), group=2)
-    
-    # Group 3: Callback Query Handlers (for inline buttons)
     application.add_handler(CallbackQueryHandler(button_callback_handler), group=3)
 
-    # Error handler
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("Exception while handling an update:", exc_info=context.error)
 
     application.add_error_handler(error_handler)
 
-    logger.info("Starting Hybrid Hunter Bot v3.1 (Fixed)...")
+    logger.info("Starting Hybrid Hunter Bot v3.3 (Elite Upgrade)...")
     application.run_polling()
 
 if __name__ == '__main__':
