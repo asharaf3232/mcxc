@@ -1,15 +1,31 @@
 # -*- coding: utf-8 -*-
+# ======================================================================================================================
+# == Hybrid Hunter Bot v1.3 | بوت الصياد الهجين ========================================================================
+# ======================================================================================================================
+#
+# v1.3 Changelog:
+# - UPGRADED: Gem Hunter is now multi-platform. It scans all connected exchanges and reports top gems for each.
+# - RE-ADDED: Pro Scan feature is back. It provides a technical score for coins based on multiple indicators.
+# - UI UPDATE: Added "Pro Scan" button to the main menu for on-demand professional scanning.
+# - LOGIC REFINEMENT: Gem hunter now uses a more robust method for checking the listing date, making it exchange-agnostic.
+#
+# ======================================================================================================================
+
+# --- المكتبات الأساسية ---
 import os
 import asyncio
 import sqlite3
 import json
 import logging
-import aiohttp
 import time
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Any, Optional
+
+import ccxt.async_support as ccxt
 import numpy as np
-from datetime import datetime, timedelta, UTC
-from collections import deque
-from telegram import Bot, ReplyKeyboardMarkup, Update
+import pandas as pd
+import pandas_ta as ta
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, BadRequest
 from telegram.ext import (
@@ -18,692 +34,207 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ContextTypes,
+    CallbackQueryHandler,
 )
 
 # =============================================================================
-# --- 🔬 وحدة التحليل الفني المحسّنة (Analysis Module) 🔬 ---
+# --- ⚙️ 1. الإعدادات والتهيأة العامة ⚙️ ---
 # =============================================================================
 
-def calculate_atr(high_prices, low_prices, close_prices, period=14):
-    """
-    يحسب مؤشر متوسط النطاق الحقيقي (ATR) بصيغته المرجعية.
-    TR = max(H-L, |H-C_prev|, |L-C_prev|)
-    """
-    if len(close_prices) < period + 1:
-        return None
-    
-    tr_values = []
-    for i in range(1, len(high_prices)):
-        high = high_prices[i]
-        low = low_prices[i]
-        prev_close = close_prices[i-1]
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        tr_values.append(tr)
-
-    return np.mean(tr_values[-period:]) if len(tr_values) >= period else None
-
-def calculate_vwap(close_prices, volumes, period=14):
-    """
-    يحسب مؤشر متوسط السعر المرجح بالحجم (VWAP).
-    VWAP = Σ(Price * Volume) / Σ(Volume)
-    """
-    if len(close_prices) < period:
-        return None
-        
-    prices = np.array(close_prices[-period:])
-    volumes = np.array(volumes[-period:])
-    
-    if np.sum(volumes) == 0:
-        return np.mean(prices)
-
-    return np.sum(prices * volumes) / np.sum(volumes)
-
-def analyze_momentum_consistency(close_prices, volumes, period=10):
-    if len(close_prices) < period:
-        return 0
-
-    recent_closes = np.array(close_prices[-period:])
-    recent_volumes = np.array(volumes[-period:])
-    price_increases = np.sum(np.diff(recent_closes) > 0)
-    
-    score = 0
-    if (price_increases / period) >= 0.6:
-        score += 1
-
-    half_period = period // 2
-    first_half_volume_avg = np.mean(recent_volumes[:half_period])
-    second_half_volume_avg = np.mean(recent_volumes[half_period:])
-
-    if first_half_volume_avg > 0 and second_half_volume_avg > (first_half_volume_avg * 1.2):
-        score += 1
-        
-    return score
-
-async def calculate_pro_score(client, symbol: str):
-    score = 0
-    analysis_details = {}
-    try:
-        klines = await client.get_processed_klines(symbol, '15m', 100)
-        if not klines or len(klines) < 50:
-            return 0, {}
-
-        close_prices = np.array([float(k[4]) for k in klines])
-        high_prices = np.array([float(k[2]) for k in klines])
-        low_prices = np.array([float(k[3]) for k in klines])
-        volumes = np.array([float(k[5]) for k in klines])
-        current_price = close_prices[-1]
-
-        # 1. Trend Analysis
-        ema20 = np.mean(close_prices[-20:])
-        ema50 = np.mean(close_prices[-50:])
-        if current_price > ema20 > ema50: score += 2; analysis_details['Trend'] = "🟢 Strong Up"
-        elif current_price > ema20: score += 1; analysis_details['Trend'] = "🟢 Up"
-        elif current_price < ema20 < ema50: score -= 2; analysis_details['Trend'] = "🔴 Strong Down"
-        elif current_price < ema20: score -= 1; analysis_details['Trend'] = "🔴 Down"
-        else: analysis_details['Trend'] = "🟡 Sideways"
-
-        # 2. Momentum
-        momentum_score = analyze_momentum_consistency(close_prices, volumes)
-        score += momentum_score
-        analysis_details['Momentum'] = f"{'🟢' * momentum_score}{'🟡' * (2-momentum_score)} ({momentum_score}/2)"
-
-        # 3. Volatility (ATR)
-        atr = calculate_atr(high_prices, low_prices, close_prices)
-        if atr:
-            volatility_percent = (atr / current_price) * 100 if current_price > 0 else 0
-            analysis_details['Volatility'] = f"{volatility_percent:.2f}%"
-            if volatility_percent > 7.0 or volatility_percent < 1.0: score -=1
-            else: score += 1
-        
-        # 4. RSI
-        rsi = calculate_rsi(close_prices)
-        if rsi:
-            analysis_details['RSI'] = f"{rsi:.1f}"
-            if rsi > 75: score -= 1
-            elif rsi < 25: score += 1
-            
-        # 5. VWAP
-        vwap = calculate_vwap(close_prices, volumes, period=20)
-        if vwap:
-            analysis_details['VWAP'] = f"{vwap:.8g}"
-            if current_price > vwap * 1.01: score += 2
-            elif current_price > vwap: score += 1
-
-        analysis_details['Final Score'] = score
-        analysis_details['Price'] = f"{current_price:.8g}"
-        return score, analysis_details
-    except Exception as e:
-        print(f"Error in pro_score for {symbol}: {e}")
-        return 0, {"Error": str(e)}
-
-# =============================================================================
-# --- الإعدادات الرئيسية ---
-# =============================================================================
-
-# --- Telegram Configuration ---
+# --- إعدادات التليجرام والملفات ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
-DATABASE_FILE = "users.db"
+TELEGRAM_ADMIN_CHAT_ID = os.environ.get('TELEGRAM_ADMIN_CHAT_ID', 'YOUR_CHAT_ID')
+DATABASE_FILE = "hybrid_hunter.db"
+SETTINGS_FILE = "hybrid_settings.json"
+LOG_FILE = "hybrid_hunter.log"
 
-# --- Exchange API Keys ---
-BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
-BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
 
-# --- إعدادات رادار الحيتان ---
-WHALE_GEM_MAX_PRICE = 0.50
-WHALE_GEM_MIN_VOLUME_24H = 100000
-WHALE_GEM_MAX_VOLUME_24H = 5000000
-WHALE_WALL_THRESHOLD_USDT = 25000
-WHALE_PRESSURE_RATIO = 3.0
-WHALE_SCAN_CANDIDATE_LIMIT = 50
-WHALE_OBI_LEVELS = 10 
-
-# --- إعدادات كاشف الزخم ---
-MOMENTUM_MAX_PRICE = 0.10
-MOMENTUM_MIN_VOLUME_24H = 50000
-MOMENTUM_MAX_VOLUME_24H = 2000000
-MOMENTUM_VOLUME_INCREASE = 1.8
-MOMENTUM_PRICE_INCREASE = 4.0
-MOMENTUM_KLINE_INTERVAL = '5m'
-MOMENTUM_KLINE_LIMIT = 12
-MOMENTUM_MIN_SCORE = 3 # ⭐ الحد الأدنى لنقاط الزخم لإطلاق تنبيه
-MOMENTUM_LOSS_THRESHOLD_PERCENT = -10.0 # نسبة الهبوط من القمة التي تعتبر "فقدان للزخم"
-
-# --- [NEW] إعدادات كاشف الانفراج ---
-DIVERGENCE_TIMEFRAME = '4h'
-DIVERGENCE_KLINE_LIMIT = 150
-DIVERGENCE_PEAK_WINDOW = 5 # عدد الشموع على كل جانب لتحديد القمة/القاع
-
-# --- إعدادات وحدة القناص (Sniper Module) v31 ---
-SNIPER_RADAR_RUN_EVERY_MINUTES = 30
-SNIPER_TRIGGER_RUN_EVERY_SECONDS = 60
-SNIPER_COMPRESSION_PERIOD_HOURS = 6 
-SNIPER_MAX_VOLATILITY_PERCENT = 18.0 
-SNIPER_BREAKOUT_VOLUME_MULTIPLIER = 3.5 
-SNIPER_MIN_USDT_VOLUME = 200000
-SNIPER_MIN_TARGET_PERCENT = 3.0 
-SNIPER_TREND_TIMEFRAME = '1h'
-SNIPER_TREND_PERIOD = 50
-SNIPER_OBI_THRESHOLD = 0.15 
-SNIPER_ATR_STOP_MULTIPLIER = 2.0 
-# [NEW] إعدادات صياد التأكيدات
-SNIPER_RETEST_RUN_EVERY_MINUTES = 2
-SNIPER_RETEST_TIMEOUT_HOURS = 4
-SNIPER_RETEST_PROXIMITY_PERCENT = 0.75 # مدى القرب من منطقة الاختراق لاعتبارها إعادة اختبار
-
-# --- إعدادات صائد الجواهر (Gem Hunter Settings) ---
-GEM_MIN_CORRECTION_PERCENT = -70.0
-GEM_MIN_24H_VOLUME_USDT = 200000
-GEM_MIN_RISE_FROM_ATL_PERCENT = 50.0
-GEM_LISTING_SINCE_DATE = datetime(2024, 1, 1, tzinfo=UTC)
-
-# --- إعدادات المهام الدورية ---
-RUN_FOMO_SCAN_EVERY_MINUTES = 15
-RUN_LISTING_SCAN_EVERY_SECONDS = 60
-RUN_PERFORMANCE_TRACKER_EVERY_MINUTES = 5
-RUN_DIVERGENCE_SCAN_EVERY_HOURS = 1 # [NEW]
-PERFORMANCE_TRACKING_DURATION_HOURS = 24
-MARKET_MOVERS_MIN_VOLUME = 50000
-
-# --- إعدادات التحليل الفني ---
-TA_KLINE_LIMIT = 200
-TA_MIN_KLINE_COUNT = 50
-FIBONACCI_PERIOD = 90
-SCALP_KLINE_LIMIT = 50
-PRO_SCAN_MIN_SCORE = 5 
-
-# --- إعدادات عامة ---
-HTTP_TIMEOUT = 15
-API_CONCURRENCY_LIMIT = 8
-TELEGRAM_MESSAGE_LIMIT = 4096
-
-# --- إعدادات تسجيل الأخطاء ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# --- إعداد مسجل الأحداث (Logger) ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.FileHandler(LOG_FILE, 'w'), logging.StreamHandler()]
+)
+logging.getLogger('ccxt').setLevel(logging.WARNING)
+logging.getLogger('telegram').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# =============================================================================
-# --- المتغيرات العامة ---
-# =============================================================================
-api_semaphore = asyncio.Semaphore(API_CONCURRENCY_LIMIT)
-PLATFORMS = ["MEXC", "Gate.io", "Binance", "Bybit", "KuCoin", "OKX"]
-performance_tracker = {p: {} for p in PLATFORMS}
-active_hunts = {p: {} for p in PLATFORMS}
-known_symbols = {p: set() for p in PLATFORMS}
-recently_alerted_fomo = {p: {} for p in PLATFORMS}
-sniper_watchlist = {p: {} for p in PLATFORMS}
-SNIPER_EXCLUDED_SUBSTRINGS = ['USD', 'DAI', 'TUSD', 'BUSD']
-def is_excluded_symbol(symbol: str) -> bool:
-    if len(symbol) > 2 and symbol[-1] in 'LS' and symbol[-2].isdigit():
-        return True
-    for sub in SNIPER_EXCLUDED_SUBSTRINGS:
-        if sub in symbol:
-            return True
-    return False
+# --- إعدادات البوت العامة ---
+PLATFORMS = ["Binance", "MEXC", "Gate.io", "Bybit", "KuCoin", "OKX"]
+SCAN_INTERVAL_MINUTES = 15
+TRACK_INTERVAL_MINUTES = 2
+PERFORMANCE_TRACKING_DURATION_HOURS = 48
 
-sniper_tracker = {p: {} for p in PLATFORMS}
-# [NEW] متغيرات عامة للميزات الجديدة
-sniper_retest_watchlist = {p: {} for p in PLATFORMS}
-recently_alerted_divergence = {}
+# --- الأنماط الجاهزة (Presets) ---
+PRESETS = {
+    "STRICT": {
+        "min_quote_volume_24h_usd": 5000000, "max_spread_percent": 0.2, "min_rvol": 2.0,
+        "min_atr_percent": 1.5, "sniper_max_volatility_percent": 12.0
+    },
+    "BALANCED": {
+        "min_quote_volume_24h_usd": 1000000, "max_spread_percent": 0.5, "min_rvol": 1.5,
+        "min_atr_percent": 1.0, "sniper_max_volatility_percent": 18.0
+    },
+    "LAX": {
+        "min_quote_volume_24h_usd": 250000, "max_spread_percent": 1.0, "min_rvol": 1.1,
+        "min_atr_percent": 0.5, "sniper_max_volatility_percent": 25.0
+    }
+}
+
+# --- الإعدادات الافتراضية ---
+DEFAULT_SETTINGS = {
+    "background_tasks_enabled": True,
+    "active_preset_name": "BALANCED",
+    "active_scanners": ["sniper_pro", "momentum_breakout", "whale_radar"],
+    "max_concurrent_trades": 5,
+    "virtual_trade_size_usdt": 100.0,
+    "use_master_trend_filter": True,
+    "master_trend_tf": "4h",
+    "master_trend_ma": 50,
+    "use_trailing_sl": True,
+    "trailing_sl_activation_percent": 1.5,
+    "trailing_sl_callback_percent": 1.0,
+    "risk_reward_ratio": 2.0,
+    "atr_sl_multiplier": 2.5,
+    "filters": PRESETS["BALANCED"],
+    "sniper_compression_hours": 6,
+    "whale_wall_threshold_usdt": 30000,
+    "gem_min_correction_percent": -70.0,
+    "gem_min_24h_volume_usdt": 200000,
+    "gem_min_rise_from_atl_percent": 50.0,
+    "gem_listing_since_days": 365,
+    "pro_scan_min_score": 5,
+}
+
+# --- متغيرات الحالة العامة ---
+bot_state = {
+    "exchanges": {},
+    "settings": {},
+    "scan_in_progress": False,
+    "recently_alerted": {},
+}
+api_semaphore = asyncio.Semaphore(10)
 
 # =============================================================================
-# --- [UPDATED] قسم إدارة المستخدمين وقاعدة البيانات ---
+# --- 🗄️ 2. إدارة الإعدادات وقاعدة البيانات 🗄️ ---
 # =============================================================================
+
+def load_settings():
+    """تحميل الإعدادات من ملف JSON ومطابقتها مع الإعدادات الافتراضية."""
+    global DEFAULT_SETTINGS
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, 'r') as f:
+                saved_settings = json.load(f)
+            
+            bot_state["settings"] = DEFAULT_SETTINGS.copy()
+            bot_state["settings"].update(saved_settings)
+
+            preset = bot_state["settings"]["active_preset_name"]
+            if preset in PRESETS:
+                 bot_state["settings"]["filters"] = PRESETS[preset]
+            logger.info("Settings loaded and synchronized successfully.")
+        else:
+            bot_state["settings"] = DEFAULT_SETTINGS.copy()
+            save_settings()
+            logger.info("No settings file found, using default settings.")
+    except Exception as e:
+        logger.error(f"Failed to load settings: {e}")
+        bot_state["settings"] = DEFAULT_SETTINGS.copy()
+
+def save_settings():
+    """حفظ الإعدادات الحالية في ملف JSON."""
+    try:
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump(bot_state["settings"], f, indent=4)
+        logger.info("Settings saved successfully.")
+    except Exception as e:
+        logger.error(f"Failed to save settings: {e}")
+
 def setup_database():
-    """إنشاء قاعدة البيانات والجداول إذا لم تكن موجودة"""
-    conn = sqlite3.connect(DATABASE_FILE)
-    cursor = conn.cursor()
-    # جدول المستخدمين
-    cursor.execute("CREATE TABLE IF NOT EXISTS users (chat_id INTEGER PRIMARY KEY)")
-    # [NEW] جدول أداء الاستراتيجيات
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS strategy_performance (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            exchange TEXT NOT NULL,
-            strategy_type TEXT NOT NULL,
-            alert_price REAL NOT NULL,
-            alert_timestamp INTEGER NOT NULL,
-            status TEXT NOT NULL,
-            peak_profit_percent REAL,
-            final_profit_percent_24h REAL
-        )
-    """)
-    conn.commit()
-    conn.close()
-    logger.info("Database is set up and ready.")
-
-def log_strategy_result(symbol, exchange, strategy_type, alert_price, status, peak_profit, final_profit):
-    """[NEW] تسجيل نتيجة تنبيه مكتمل في قاعدة البيانات"""
+    """إنشاء قاعدة البيانات والجداول إذا لم تكن موجودة."""
     try:
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO strategy_performance 
-            (symbol, exchange, strategy_type, alert_price, alert_timestamp, status, peak_profit_percent, final_profit_percent_24h)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (symbol, exchange, strategy_type, alert_price, int(datetime.now(UTC).timestamp()), status, peak_profit, final_profit))
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                strategy TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                initial_stop_loss REAL NOT NULL,
+                current_stop_loss REAL NOT NULL,
+                take_profit REAL NOT NULL,
+                trade_value_usdt REAL NOT NULL,
+                status TEXT NOT NULL,
+                exit_price REAL,
+                closed_at TEXT,
+                pnl_usdt REAL,
+                pnl_percent REAL,
+                highest_price REAL,
+                trailing_sl_active BOOLEAN DEFAULT 0
+            )
+        """)
         conn.commit()
         conn.close()
-        logger.info(f"STRATEGY LOGGED: {strategy_type} for {symbol} on {exchange} with status {status}.")
-    except sqlite3.Error as e:
-        logger.error(f"Database error while logging strategy result for {symbol}: {e}")
-
-def get_strategy_stats():
-    """[NEW] جلب إحصائيات الأداء من قاعدة البيانات"""
-    try:
-        conn = sqlite3.connect(DATABASE_FILE)
-        cursor = conn.cursor()
-        # جلب البيانات من آخر 30 يومًا فقط
-        thirty_days_ago = int((datetime.now(UTC) - timedelta(days=30)).timestamp())
-        cursor.execute(
-            "SELECT strategy_type, status, peak_profit_percent FROM strategy_performance WHERE alert_timestamp >= ?",
-            (thirty_days_ago,)
-        )
-        records = cursor.fetchall()
-        conn.close()
-        return records
-    except sqlite3.Error as e:
-        logger.error(f"Database error while fetching strategy stats: {e}")
-        return []
-
-def load_user_ids():
-    """تحميل قائمة معرفات المستخدمين من قاعدة البيانات"""
-    try:
-        conn = sqlite3.connect(DATABASE_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT chat_id FROM users")
-        user_ids = {row[0] for row in cursor.fetchall()}
-        conn.close()
-        return user_ids
-    except sqlite3.Error as e:
-        logger.error(f"Database error while loading users: {e}")
-        return set()
-
-def save_user_id(chat_id):
-    """حفظ معرف مستخدم جديد في قاعدة البيانات"""
-    try:
-        conn = sqlite3.connect(DATABASE_FILE)
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO users (chat_id) VALUES (?)", (chat_id,))
-        conn.commit()
-        conn.close()
-        logger.info(f"User with chat_id: {chat_id} has been saved or already exists.")
-    except sqlite3.Error as e:
-        logger.error(f"Database error while saving user {chat_id}: {e}")
-
-def remove_user_id(chat_id):
-    """إزالة معرف مستخدم من قاعدة البيانات"""
-    try:
-        conn = sqlite3.connect(DATABASE_FILE)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM users WHERE chat_id = ?", (chat_id,))
-        conn.commit()
-        conn.close()
-        logger.warning(f"User {chat_id} has been removed from the database.")
-    except sqlite3.Error as e:
-        logger.error(f"Database error while removing user {chat_id}: {e}")
-
-async def broadcast_message(bot: Bot, message_text: str, parse_mode=ParseMode.MARKDOWN):
-    """إرسال رسالة إلى جميع المستخدمين المسجلين"""
-    user_ids = load_user_ids()
-    if not user_ids:
-        logger.warning("Broadcast requested, but no users are registered.")
-        return
-
-    for user_id in user_ids:
-        try:
-            await bot.send_message(chat_id=user_id, text=message_text, parse_mode=parse_mode)
-        except Forbidden:
-            remove_user_id(user_id)
-        except BadRequest as e:
-            logger.error(f"Failed to send message to {user_id}: {e}")
-            if "chat not found" in str(e):
-                remove_user_id(user_id)
-        except Exception as e:
-            logger.error(f"An unexpected error occurred while sending to {user_id}: {e}")
-
-# =============================================================================
-# --- قسم الشبكة والوظائف الأساسية (مشتركة) ---
-# =============================================================================
-async def fetch_json(session: aiohttp.ClientSession, url: str, params: dict = None, headers: dict = None, retries: int = 3):
-    request_headers = {'User-Agent': 'Mozilla/5.0'}
-    if headers: request_headers.update(headers)
-
-    for attempt in range(retries):
-        try:
-            async with session.get(url, params=params, timeout=HTTP_TIMEOUT, headers=request_headers) as response:
-                if response.status == 429:
-                    wait_time = 2 ** (attempt + 1)
-                    logger.warning(f"Rate limit hit (429) for {url}. Retrying after {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                    continue
-                response.raise_for_status()
-                return await response.json()
-        except Exception as e:
-            logger.error(f"Error fetching {url}: {e}")
-            if attempt >= retries - 1: return None
-            await asyncio.sleep(1)
-    return None
-
-def format_price(price_str):
-    try: 
-        price = float(price_str)
-        if price < 1e-4:
-            return f"{price:.10f}".rstrip('0')
-        return f"{price:.8g}"
-    except (ValueError, TypeError): return price_str
-
-# =============================================================================
-# --- ⚙️ قسم عملاء المنصات (Exchange Clients) ⚙️ ---
-# =============================================================================
-class BaseExchangeClient:
-    def __init__(self, session, api_key=None, api_secret=None):
-        self.session = session
-        self.name = "Base"
-    async def get_market_data(self): raise NotImplementedError
-    async def get_klines(self, symbol, interval, limit): raise NotImplementedError
-    async def get_order_book(self, symbol, limit=20): raise NotImplementedError
-    async def get_current_price(self, symbol): raise NotImplementedError
-
-    async def get_processed_klines(self, symbol, interval, limit):
-        klines = await self.get_klines(symbol, interval, limit)
-        if not klines: return None
-        klines.sort(key=lambda x: int(x[0]))
-        return klines
-
-class MexcClient(BaseExchangeClient):
-    def __init__(self, session, **kwargs):
-        super().__init__(session, **kwargs)
-        self.name = "MEXC"
-        self.base_api_url = "https://api.mexc.com"
-        self.interval_map = {'1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '4h', '1d': '1d'}
-
-    async def get_market_data(self):
-        data = await fetch_json(self.session, f"{self.base_api_url}/api/v3/ticker/24hr")
-        if not data: return []
-        return [{'symbol': i['symbol'], 'quoteVolume': i.get('quoteVolume') or '0', 'lastPrice': i.get('lastPrice') or '0', 'priceChangePercent': float(i.get('priceChangePercent','0'))*100} for i in data if i.get('symbol','').endswith("USDT")]
-
-    async def get_klines(self, symbol, interval, limit):
-        api_interval = self.interval_map.get(interval, interval)
-        async with api_semaphore:
-            params = {'symbol': symbol, 'interval': api_interval, 'limit': limit}
-            await asyncio.sleep(0.1)
-            data = await fetch_json(self.session, f"{self.base_api_url}/api/v3/klines", params=params)
-            return [[item[0], item[1], item[2], item[3], item[4], item[5]] for item in data] if data else None
-
-    async def get_order_book(self, symbol, limit=20):
-        async with api_semaphore:
-            params = {'symbol': symbol, 'limit': limit}
-            await asyncio.sleep(0.1)
-            return await fetch_json(self.session, f"{self.base_api_url}/api/v3/depth", params)
-
-    async def get_current_price(self, symbol: str) -> float | None:
-        data = await fetch_json(self.session, f"{self.base_api_url}/api/v3/ticker/price", {'symbol': symbol})
-        return float(data['price']) if data and 'price' in data else None
-
-class GateioClient(BaseExchangeClient):
-    def __init__(self, session, **kwargs):
-        super().__init__(session, **kwargs)
-        self.name = "Gate.io"
-        self.base_api_url = "https://api.gateio.ws/api/v4"
-        self.interval_map = {'1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '4h', '1d': '1d'}
-
-    async def get_market_data(self):
-        data = await fetch_json(self.session, f"{self.base_api_url}/spot/tickers")
-        if not data: return []
-        return [{'symbol': i['currency_pair'].replace('_',''), 'quoteVolume': i.get('quote_volume') or '0', 'lastPrice': i.get('last') or '0', 'priceChangePercent': float(i.get('change_percentage','0'))} for i in data if i.get('currency_pair','').endswith("_USDT")]
-
-    async def get_klines(self, symbol, interval, limit):
-        gateio_symbol = f"{symbol[:-4]}_{symbol[-4:]}"
-        api_interval = self.interval_map.get(interval, interval)
-        async with api_semaphore:
-            params = {'currency_pair': gateio_symbol, 'interval': api_interval, 'limit': limit}
-            await asyncio.sleep(0.2)
-            data = await fetch_json(self.session, f"{self.base_api_url}/spot/candlesticks", params=params)
-            if not data: return None
-            return [[int(k[0])*1000, k[5], k[3], k[4], k[2], k[1]] for k in data]
-
-    async def get_order_book(self, symbol, limit=20):
-        gateio_symbol = f"{symbol[:-4]}_{symbol[-4:]}"
-        async with api_semaphore:
-            params = {'currency_pair': gateio_symbol, 'limit': limit}
-            await asyncio.sleep(0.2)
-            return await fetch_json(self.session, f"{self.base_api_url}/spot/order_book", params)
-
-    async def get_current_price(self, symbol: str) -> float | None:
-        gateio_symbol = f"{symbol[:-4]}_{symbol[-4:]}"
-        data = await fetch_json(self.session, f"{self.base_api_url}/spot/tickers", {'currency_pair': gateio_symbol})
-        return float(data[0]['last']) if data and isinstance(data, list) and len(data) > 0 and 'last' in data[0] else None
-
-class BinanceClient(BaseExchangeClient):
-    def __init__(self, session, **kwargs):
-        super().__init__(session, **kwargs)
-        self.name = "Binance"
-        self.base_api_url = "https://api.binance.com"
-        self.interval_map = {'1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '4h', '1d': '1d'}
-
-    async def get_market_data(self):
-        data = await fetch_json(self.session, f"{self.base_api_url}/api/v3/ticker/24hr")
-        if not data: return []
-        return [{'symbol': i['symbol'], 'quoteVolume': i.get('quoteVolume') or '0', 'lastPrice': i.get('lastPrice') or '0', 'priceChangePercent': float(i.get('priceChangePercent','0'))} for i in data if i.get('symbol','').endswith("USDT")]
-
-    async def get_klines(self, symbol, interval, limit):
-        api_interval = self.interval_map.get(interval, interval)
-        async with api_semaphore:
-            params = {'symbol': symbol, 'interval': api_interval, 'limit': limit}
-            await asyncio.sleep(0.1)
-            data = await fetch_json(self.session, f"{self.base_api_url}/api/v3/klines", params=params)
-            return [[item[0], item[1], item[2], item[3], item[4], item[5]] for item in data] if data else None
-
-    async def get_order_book(self, symbol, limit=20):
-        async with api_semaphore:
-            params = {'symbol': symbol, 'limit': limit}
-            await asyncio.sleep(0.1)
-            return await fetch_json(self.session, f"{self.base_api_url}/api/v3/depth", params)
-
-    async def get_current_price(self, symbol: str) -> float | None:
-        data = await fetch_json(self.session, f"{self.base_api_url}/api/v3/ticker/price", {'symbol': symbol})
-        return float(data['price']) if data and 'price' in data else None
-
-class BybitClient(BaseExchangeClient):
-    def __init__(self, session, **kwargs):
-        super().__init__(session, **kwargs)
-        self.name = "Bybit"
-        self.base_api_url = "https://api.bybit.com"
-        self.interval_map = {'1m': '1', '5m': '5', '15m': '15', '1h': '60', '4h': '240', '1d': 'D'}
-
-    async def get_market_data(self):
-        data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/tickers", params={'category': 'spot'})
-        if not data or not data.get('result') or not data['result'].get('list'): return []
-        return [{'symbol': i['symbol'], 'quoteVolume': i.get('turnover24h') or '0', 'lastPrice': i.get('lastPrice') or '0', 'priceChangePercent': float(i.get('price24hPcnt','0'))*100} for i in data['result']['list'] if i['symbol'].endswith("USDT")]
-
-    async def get_klines(self, symbol, interval, limit):
-        async with api_semaphore:
-            api_interval = self.interval_map.get(interval, '5')
-            params = {'category': 'spot', 'symbol': symbol, 'interval': api_interval, 'limit': limit}
-            await asyncio.sleep(0.1)
-            data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/kline", params=params)
-            if not data or not data.get('result') or not data['result'].get('list'): return None
-            return [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['result']['list']]
-
-    async def get_order_book(self, symbol, limit=20):
-        async with api_semaphore:
-            params = {'category': 'spot', 'symbol': symbol, 'limit': limit}
-            await asyncio.sleep(0.1)
-            data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/orderbook", params)
-            if not data or not data.get('result'): return None
-            return {'bids': data['result'].get('bids', []), 'asks': data['result'].get('asks', [])}
-
-    async def get_current_price(self, symbol: str) -> float | None:
-        data = await fetch_json(self.session, f"{self.base_api_url}/v5/market/tickers", params={'category': 'spot', 'symbol': symbol})
-        if not data or not data.get('result') or not data['result'].get('list'): return None
-        return float(data['result']['list'][0]['lastPrice'])
-
-class KucoinClient(BaseExchangeClient):
-    def __init__(self, session, **kwargs):
-        super().__init__(session, **kwargs)
-        self.name = "KuCoin"
-        self.base_api_url = "https://api.kucoin.com"
-        self.interval_map = {'1m':'1min', '5m':'5min', '15m':'15min', '1h': '1hour', '4h': '4hour', '1d': '1day'}
-
-    async def get_market_data(self):
-        data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/allTickers")
-        if not data or not data.get('data') or not data['data'].get('ticker'): return []
-        return [{'symbol': i['symbol'].replace('-',''), 'quoteVolume': i.get('volValue') or '0', 'lastPrice': i.get('last') or '0', 'priceChangePercent': float(i.get('changeRate','0'))*100} for i in data['data']['ticker'] if i.get('symbol','').endswith("-USDT")]
-
-    async def get_klines(self, symbol, interval, limit):
-        kucoin_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
-        api_interval = self.interval_map.get(interval, '5min')
-        async with api_semaphore:
-            params = {'symbol': kucoin_symbol, 'type': api_interval}
-            await asyncio.sleep(0.1)
-            data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/candles", params=params)
-            if not data or not data.get('data'): return None
-            return [[int(k[0])*1000, k[2], k[3], k[4], k[1], k[5]] for k in data['data']]
-
-    async def get_order_book(self, symbol, limit=20):
-        kucoin_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
-        async with api_semaphore:
-            params = {'symbol': kucoin_symbol}
-            await asyncio.sleep(0.1)
-            return await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/orderbook/level2_20", params)
-
-    async def get_current_price(self, symbol: str) -> float | None:
-        kucoin_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
-        data = await fetch_json(self.session, f"{self.base_api_url}/api/v1/market/orderbook/level1", {'symbol': kucoin_symbol})
-        if not data or not data.get('data'): return None
-        return float(data['data']['price'])
-
-class OkxClient(BaseExchangeClient):
-    def __init__(self, session, **kwargs):
-        super().__init__(session, **kwargs)
-        self.name = "OKX"
-        self.base_api_url = "https://www.okx.com"
-        self.interval_map = {'1m': '1m', '5m': '5m', '15m': '15m', '1h': '1H', '4h': '4H', '1d': '1D'}
-
-    async def get_market_data(self):
-        data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/tickers", params={'instType': 'SPOT'})
-        if not data or not data.get('data'): return []
-        results = []
-        for i in data['data']:
-            if i.get('instId','').endswith("-USDT"):
-                try:
-                    lp, op = float(i.get('last') or '0'), float(i.get('open24h') or '0')
-                    cp = ((lp-op)/op)*100 if op > 0 else 0.0
-                    results.append({'symbol': i['instId'].replace('-',''), 'quoteVolume': i.get('volCcy24h') or '0', 'lastPrice': i.get('last') or '0', 'priceChangePercent': cp})
-                except (ValueError, TypeError): continue
-        return results
-
-    async def get_klines(self, symbol, interval, limit):
-        api_interval = self.interval_map.get(interval, '5m')
-        okx_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
-        async with api_semaphore:
-            params = {'instId': okx_symbol, 'bar': api_interval, 'limit': limit}
-            await asyncio.sleep(0.25)
-            data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/candles", params=params)
-            if not data or not data.get('data'): return None
-            return [[int(k[0]), k[1], k[2], k[3], k[4], k[5]] for k in data['data']]
-
-    async def get_order_book(self, symbol, limit=20):
-        okx_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
-        async with api_semaphore:
-            params = {'instId': okx_symbol, 'sz': str(limit)}
-            await asyncio.sleep(0.25)
-            data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/books", params)
-            if not data or not data.get('data'): return None
-            book_data = data['data'][0]
-            return {'bids': book_data.get('bids',[]), 'asks': book_data.get('asks',[])}
-
-    async def get_current_price(self, symbol: str) -> float | None:
-        okx_symbol = f"{symbol[:-4]}-{symbol[-4:]}"
-        data = await fetch_json(self.session, f"{self.base_api_url}/api/v5/market/tickers", params={'instId': okx_symbol})
-        if not data or not data.get('data'): return None
-        return float(data['data'][0]['last'])
-
-def get_exchange_client(exchange_name, session):
-    clients = {'mexc': MexcClient, 'gate.io': GateioClient, 'binance': BinanceClient, 'bybit': BybitClient, 'kucoin': KucoinClient, 'okx': OkxClient}
-    client_class = clients.get(exchange_name.lower())
-    return client_class(session) if client_class else None
-
-# =============================================================================
-# --- 🔬 قسم التحليل الفني والكمي (Quantitative & TA Section) 🔬 ---
-# =============================================================================
-def calculate_poc(klines, num_bins=50):
-    if not klines or len(klines) < 10: return None
-    try:
-        high_prices = np.array([float(k[2]) for k in klines])
-        low_prices = np.array([float(k[3]) for k in klines])
-        volumes = np.array([float(k[5]) for k in klines])
-        min_price, max_price = np.min(low_prices), np.max(high_prices)
-        if max_price == min_price: return min_price
-        price_bins = np.linspace(min_price, max_price, num_bins)
-        volume_per_bin = np.zeros(num_bins)
-        for i in range(len(klines)):
-            avg_price = (high_prices[i] + low_prices[i]) / 2
-            bin_index = np.searchsorted(price_bins, avg_price) -1
-            if 0 <= bin_index < num_bins:
-                volume_per_bin[bin_index] += volumes[i]
-        if np.sum(volume_per_bin) == 0: return None
-        poc_index = np.argmax(volume_per_bin)
-        return price_bins[poc_index]
+        logger.info("Database is set up and ready.")
     except Exception as e:
-        logger.error(f"Error calculating POC: {e}")
+        logger.error(f"Database setup failed: {e}")
+
+# =============================================================================
+# --- 🌐 3. محرك الاتصال بالمنصات (CCXT) 🌐 ---
+# =============================================================================
+
+async def initialize_exchanges():
+    """تهيئة الاتصال بجميع المنصات باستخدام CCXT."""
+    for ex_id in PLATFORMS:
+        try:
+            exchange_class = getattr(ccxt, ex_id.lower())
+            exchange = exchange_class({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
+            await exchange.load_markets()
+            bot_state["exchanges"][ex_id] = exchange
+            logger.info(f"Successfully connected to {ex_id}.")
+        except Exception as e:
+            logger.error(f"Failed to connect to {ex_id}: {e}")
+
+async def safe_fetch_ohlcv(exchange: ccxt.Exchange, symbol: str, timeframe: str, limit: int) -> Optional[List]:
+    """جلب بيانات الشموع مع معالجة الأخطاء."""
+    async with api_semaphore:
+        try:
+            return await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        except Exception as e:
+            logger.warning(f"Could not fetch OHLCV for {symbol} on {exchange.id}: {e}")
+            return None
+
+async def get_current_price(exchange: ccxt.Exchange, symbol: str) -> Optional[float]:
+    """جلب السعر الحالي للعملة."""
+    try:
+        ticker = await exchange.fetch_ticker(symbol)
+        return ticker['last'] if ticker and 'last' in ticker else None
+    except Exception as e:
+        logger.warning(f"Could not fetch current price for {symbol} on {exchange.id}: {e}")
         return None
 
-def calculate_ema_series(prices, period):
-    if len(prices) < period: return []
-    ema, sma = [], sum(prices[:period]) / period
-    ema.append(sma)
-    multiplier = 2 / (period + 1)
-    for price in prices[period:]:
-        ema.append((price - ema[-1]) * multiplier + ema[-1])
-    return ema
+# =============================================================================
+# --- 🔬 4. وحدات التحليل الفني والكمي 🔬 ---
+# =============================================================================
 
-def calculate_ema(prices, period):
-    if len(prices) < period: return None
-    return calculate_ema_series(prices, period)[-1]
-
-def calculate_sma(prices, period):
-    if len(prices) < period: return None
-    return np.mean(prices[-period:])
-
-def calculate_macd(prices, fast_period=12, slow_period=26, signal_period=9):
-    if len(prices) < slow_period: return None, None
-    ema_fast = calculate_ema_series(prices, fast_period)
-    ema_slow = calculate_ema_series(prices, slow_period)
-    if not ema_fast or not ema_slow: return None, None
-    ema_fast = ema_fast[len(ema_fast) - len(ema_slow):]
-    macd_line_series = np.array(ema_fast) - np.array(ema_slow)
-    signal_line_series = calculate_ema_series(macd_line_series.tolist(), signal_period)
-    if not signal_line_series: return None, None
-    return macd_line_series[-1], signal_line_series[-1]
-
-def calculate_rsi(prices, period=14):
-    if len(prices) < period + 1: return None
-    deltas = np.diff(prices)
-    gains = deltas[deltas >= 0]
-    losses = -deltas[deltas < 0]
-    if len(gains) == 0: return 0
-    if len(losses) == 0: return 100
-    avg_gain = np.mean(gains)
-    avg_loss = np.mean(losses)
-    if avg_loss == 0: return 100
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-def calculate_bollinger_bands(prices, period=20, num_std_dev=2):
-    if len(prices) < period: return None, None, None
-    middle_band = calculate_sma(prices, period)
-    if middle_band is None: return None, None, None
-    std_dev = np.std(prices[-period:])
-    upper_band = middle_band + (std_dev * num_std_dev)
-    lower_band = middle_band - (std_dev * num_std_dev)
-    return upper_band, middle_band, lower_band
-
-def bollinger_bandwidth(prices, period=20):
-    bands = calculate_bollinger_bands(prices, period)
-    if not all(bands): return None
-    upper, middle, lower = bands
-    return ((upper - lower) / middle) * 100 if middle > 0 else None
+def analyze_order_book_for_whales(order_book: Dict, threshold: float) -> Optional[Dict]:
+    """يحلل دفتر الطلبات لرصد جدران الشراء والبيع."""
+    if not order_book or not order_book.get('bids') or not order_book.get('asks'):
+        return None
+    
+    total_bid_value = sum(float(price) * float(qty) for price, qty in order_book['bids'][:10])
+    total_ask_value = sum(float(price) * float(qty) for price, qty in order_book['asks'][:10])
+    
+    if total_bid_value > threshold and total_bid_value > total_ask_value * 2:
+        return {'type': 'Buy Wall', 'value': total_bid_value}
+    if total_ask_value > threshold and total_ask_value > total_bid_value * 2:
+        return {'type': 'Sell Wall', 'value': total_ask_value}
+    
+    return None
 
 def find_support_resistance(high_prices, low_prices, window=10):
     supports, resistances = [], []
@@ -711,20 +242,6 @@ def find_support_resistance(high_prices, low_prices, window=10):
         if high_prices[i] == max(high_prices[i-window:i+window+1]): resistances.append(high_prices[i])
         if low_prices[i] == min(low_prices[i-window:i+window+1]): supports.append(low_prices[i])
     return sorted(list(set(supports)), reverse=True), sorted(list(set(resistances)), reverse=True)
-
-def calculate_fibonacci_retracement(high_prices, low_prices, period=FIBONACCI_PERIOD):
-    if len(high_prices) < period:
-        recent_highs, recent_lows = high_prices, low_prices
-    else:
-        recent_highs, recent_lows = high_prices[-period:], low_prices[-period:]
-    max_price, min_price = np.max(recent_highs), np.min(recent_lows)
-    difference = max_price - min_price
-    if difference == 0: return {}
-    return {
-        'level_0.382': max_price - (difference * 0.382),
-        'level_0.5': max_price - (difference * 0.5),
-        'level_0.618': max_price - (difference * 0.618),
-    }
 
 def analyze_trend(current_price, ema21, ema50, sma100):
     if ema21 and ema50 and sma100:
@@ -734,1117 +251,873 @@ def analyze_trend(current_price, ema21, ema50, sma100):
         if current_price < ema50 and current_price < ema21: return "🔴 اتجاه هابط.", -1
     return "🟡 جانبي / غير واضح.", 0
 
-def order_book_imbalance(bids, asks, top_n=10):
-    try:
-        b = sum(float(p) * float(q) for p, q in bids[:top_n])
-        a = sum(float(p) * float(q) for p, q in asks[:top_n])
-        denom = (b + a)
-        return (b - a) / denom if denom > 0 else 0.0
-    except (ValueError, TypeError):
-        return 0.0
+def format_price(price):
+    try: 
+        price_float = float(price)
+        if price_float < 1e-4: return f"{price_float:.10f}".rstrip('0')
+        return f"{price_float:.8g}"
+    except (ValueError, TypeError): return price
 
 # =============================================================================
-# --- الوظائف المساعدة للتحليل ---
+# --- 🛡️ 5. نظام الفلترة المتقدم 🛡️ ---
 # =============================================================================
-async def helper_get_advanced_momentum(client: BaseExchangeClient):
-    market_data = await client.get_market_data()
-    if not market_data: return []
 
-    potential_coins = [
-        p for p in market_data 
-        if float(p.get('lastPrice','1')) <= MOMENTUM_MAX_PRICE 
-        and MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= MOMENTUM_MAX_VOLUME_24H
-    ]
-    if not potential_coins: return []
-
-    async def score_candidate(symbol):
-        try:
-            klines_5m = await client.get_processed_klines(symbol, '5m', 30)
-            if not klines_5m or len(klines_5m) < 20: return None
-
-            score = 0
-            details = {'symbol': symbol}
-
-            close_prices = np.array([float(k[4]) for k in klines_5m])
-            volumes = np.array([float(k[5]) for k in klines_5m])
-            current_price = close_prices[-1]
-            
-            start_price = float(klines_5m[-12][4])
-            if start_price > 0:
-                price_change = ((current_price - start_price) / start_price) * 100
-                if price_change > MOMENTUM_PRICE_INCREASE: score += 1
-                details['price_change'] = price_change
-
-            old_volume = sum(float(k[5]) for k in klines_5m[-24:-12]) if len(klines_5m) >= 24 else 0
-            new_volume = sum(float(k[5]) for k in klines_5m[-12:])
-            if old_volume > 0 and new_volume > old_volume * MOMENTUM_VOLUME_INCREASE: score += 1
-
-            positive_candles = sum(1 for k in klines_5m[-5:] if float(k[4]) > float(k[1]))
-            if positive_candles >= 3: score += 1
-            details['positive_candles'] = f"{positive_candles}/5"
-
-            rsi = calculate_rsi(close_prices, period=14)
-            if rsi:
-                details['rsi'] = rsi
-                if rsi > 60: score += 1
-                if rsi > 85: score -= 1 
-
-            klines_15m = await client.get_processed_klines(symbol, '15m', 20)
-            if klines_15m:
-                vwap = calculate_vwap([float(k[4]) for k in klines_15m], [float(k[5]) for k in klines_15m], 14)
-                if vwap and current_price > vwap: score += 1
-            
-            details['score'] = score
-            details['current_price'] = current_price
-            if score >= MOMENTUM_MIN_SCORE: return details
-            return None
-        except Exception: return None
-
-    tasks = [score_candidate(p['symbol']) for p in potential_coins]
-    results = await asyncio.gather(*tasks)
-    momentum_coins = [res for res in results if res is not None]
-    return sorted(momentum_coins, key=lambda x: x['score'], reverse=True)
-
-async def helper_get_whale_activity(client: BaseExchangeClient):
-    market_data = await client.get_market_data()
-    if not market_data: return {}
-    potential_gems = [p for p in market_data if float(p.get('lastPrice','999')) <= WHALE_GEM_MAX_PRICE and WHALE_GEM_MIN_VOLUME_24H <= float(p.get('quoteVolume','0')) <= WHALE_GEM_MAX_VOLUME_24H]
-    if not potential_gems: return {}
-    
-    for p in potential_gems: p['change_float'] = p.get('priceChangePercent', 0)
-    top_gems = sorted(potential_gems, key=lambda x: x['change_float'], reverse=True)[:WHALE_SCAN_CANDIDATE_LIMIT]
-    
-    tasks = [client.get_order_book(p['symbol'], WHALE_OBI_LEVELS) for p in top_gems]
-    all_order_books = await asyncio.gather(*tasks)
-    
-    whale_signals_by_symbol = {}
-    for i, book in enumerate(all_order_books):
-        symbol = top_gems[i]['symbol']
-        signals = await analyze_order_book_for_whales(book, symbol)
-        if signals:
-            if symbol not in whale_signals_by_symbol: whale_signals_by_symbol[symbol] = []
-            whale_signals_by_symbol[symbol].extend(signals)
-    return whale_signals_by_symbol
-
-async def analyze_order_book_for_whales(book, symbol):
-    signals = []
-    if not book or not book.get('bids') or not book.get('asks'): return signals
+async def pre_scan_filter(exchange: ccxt.Exchange) -> List[Dict]:
+    """
+    يقوم بالفلترة الأولية للسوق بناءً على السيولة والتقلب والاتجاه العام.
+    يعيد قائمة بالعملات المرشحة لمزيد من التحليل.
+    """
+    logger.info(f"[{exchange.id}] Starting pre-scan filter...")
+    filters_cfg = bot_state["settings"]["filters"]
     try:
-        bids, asks = [], []
-        for item in book.get('bids', []):
-            if isinstance(item, list) and len(item) == 2:
-                try: bids.append((float(item[0]), float(item[1])))
-                except (ValueError, TypeError): continue
-        for item in book.get('asks', []):
-            if isinstance(item, list) and len(item) == 2:
-                try: asks.append((float(item[0]), float(item[1])))
-                except (ValueError, TypeError): continue
+        tickers = await exchange.fetch_tickers()
+        if not tickers: return []
+    except Exception as e:
+        logger.error(f"[{exchange.id}] Could not fetch tickers for filtering: {e}")
+        return []
 
-        for price, qty in bids[:5]:
-            value = price * qty
-            if value >= WHALE_WALL_THRESHOLD_USDT:
-                signals.append({'type': 'Buy Wall', 'symbol': symbol, 'value': value, 'price': price}); break
-        for price, qty in asks[:5]:
-            value = price * qty
-            if value >= WHALE_WALL_THRESHOLD_USDT:
-                signals.append({'type': 'Sell Wall', 'symbol': symbol, 'value': value, 'price': price}); break
+    candidates = []
+    for symbol, ticker in tickers.items():
+        if (symbol.endswith('/USDT') and 
+            ticker.get('quoteVolume') and ticker['quoteVolume'] > filters_cfg['min_quote_volume_24h_usd'] and
+            ticker.get('bid') and ticker.get('ask') and
+            not any(k in symbol for k in ['UP/', 'DOWN/', '3L/', '3S/'])):
+            
+            spread = (ticker['ask'] - ticker['bid']) / ticker['ask'] * 100
+            if spread < filters_cfg['max_spread_percent']:
+                candidates.append({'symbol': symbol, 'ticker': ticker})
+
+    logger.info(f"[{exchange.id}] Found {len(candidates)} candidates after initial volume and spread filter.")
+    
+    final_candidates = []
+    binance_exchange = bot_state["exchanges"].get("Binance")
+    if not binance_exchange:
+        logger.error("Binance exchange not found for master trend, proceeding without it.")
+        btc_trend_is_bullish = True
+    else:
+        btc_trend_is_bullish = await get_master_trend(binance_exchange)
+    
+    if bot_state["settings"]["use_master_trend_filter"] and not btc_trend_is_bullish:
+        logger.warning(f"[{exchange.id}] Master Trend Filter is ACTIVE and market is BEARISH. Skipping deep scan.")
+        return []
+
+    for candidate in candidates:
+        symbol = candidate['symbol']
+        await asyncio.sleep(exchange.rateLimit / 1000) 
+        ohlcv = await safe_fetch_ohlcv(exchange, symbol, '15m', 50)
+        if not ohlcv or len(ohlcv) < 30: continue
+            
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        obi = order_book_imbalance(bids, asks, WHALE_OBI_LEVELS)
-        if obi > SNIPER_OBI_THRESHOLD: 
-            signals.append({'type': 'Buy Pressure', 'symbol': symbol, 'value': obi})
-        elif obi < -SNIPER_OBI_THRESHOLD:
-             signals.append({'type': 'Sell Pressure', 'symbol': symbol, 'value': obi})
+        avg_volume = df['volume'].rolling(window=20).mean().iloc[-2]
+        rvol = df['volume'].iloc[-2] / avg_volume if avg_volume > 0 else 0
+        if rvol < filters_cfg['min_rvol']: continue
+        
+        atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
+        atr_percent = (atr / df['close'].iloc[-1]) * 100 if df['close'].iloc[-1] > 0 else 0
+        if atr_percent < filters_cfg['min_atr_percent']: continue
+        
+        final_candidates.append({'symbol': symbol, 'df_15m': df})
+
+    logger.info(f"[{exchange.id}] Pre-scan complete. Found {len(final_candidates)} high-quality candidates.")
+    return final_candidates
+
+async def get_master_trend(exchange: ccxt.Exchange) -> bool:
+    """يحدد الاتجاه العام للسوق من خلال تحليل BTC/USDT."""
+    settings = bot_state["settings"]
+    try:
+        ohlcv = await safe_fetch_ohlcv(exchange, 'BTC/USDT', settings["master_trend_tf"], settings["master_trend_ma"] + 5)
+        if not ohlcv: return True 
+        
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        sma = ta.sma(df['close'], length=settings["master_trend_ma"]).iloc[-1]
+        current_price = df['close'].iloc[-1]
+        
+        is_bullish = current_price > sma
+        logger.info(f"Master Trend (BTC/{settings['master_trend_tf']}): {'BULLISH' if is_bullish else 'BEARISH'} (Price: {current_price:.0f}, SMA{settings['master_trend_ma']}: {sma:.0f})")
+        return is_bullish
+    except Exception as e:
+        logger.error(f"Failed to get master trend: {e}")
+        return True
+
+# =============================================================================
+# --- 🎯 6. محركات الاستراتيجيات الهجينة 🎯 ---
+# =============================================================================
+
+async def run_sniper_pro_scan(exchange: ccxt.Exchange, candidate: Dict) -> Optional[Dict]:
+    """استراتيجية القناص المدمجة: تبحث عن انضغاط سعري ثم اختراق مؤكد."""
+    symbol = candidate['symbol']
+    filters_cfg = bot_state["settings"]["filters"]
+    compression_candles = int(bot_state["settings"]["sniper_compression_hours"] * 4)
+
+    ohlcv = await safe_fetch_ohlcv(exchange, symbol, '15m', compression_candles + 20)
+    if not ohlcv or len(ohlcv) < compression_candles: return None
+
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    
+    compression_df = df.iloc[-compression_candles-1:-1]
+    highest_high = compression_df['high'].max()
+    lowest_low = compression_df['low'].min()
+    
+    volatility = (highest_high - lowest_low) / lowest_low * 100
+    
+    if volatility < filters_cfg["sniper_max_volatility_percent"]:
+        last_candle = df.iloc[-2]
+        if last_candle['close'] > highest_high:
+            avg_volume = compression_df['volume'].mean()
+            if last_candle['volume'] > avg_volume * 2:
+                return {"strategy": "Sniper Pro", "entry_price": last_candle['close']}
+    return None
+
+async def run_momentum_breakout_scan(exchange: ccxt.Exchange, candidate: Dict) -> Optional[Dict]:
+    """استراتيجية اختراق الزخم."""
+    df = candidate['df_15m']
+    df.ta.macd(fast=12, slow=26, signal=9, append=True)
+    df.ta.rsi(length=14, append=True)
+    df.ta.bbands(length=20, std=2, append=True)
+    
+    last = df.iloc[-2]
+    prev = df.iloc[-3]
+    
+    macd_crossed_up = prev['MACD_12_26_9'] <= prev['MACDs_12_26_9'] and last['MACD_12_26_9'] > last['MACDs_12_26_9']
+    price_broke_bb = last['close'] > last['BBU_20_2.0']
+    rsi_not_overbought = last['RSI_14'] < 70
+    
+    if macd_crossed_up and price_broke_bb and rsi_not_overbought:
+        return {"strategy": "Momentum Breakout", "entry_price": last['close']}
+    return None
+
+async def run_whale_radar_scan(exchange: ccxt.Exchange, candidate: Dict) -> Optional[Dict]:
+    """رادار الحيتان: يبحث عن جدران الشراء الكبيرة."""
+    symbol = candidate['symbol']
+    threshold = bot_state["settings"]["whale_wall_threshold_usdt"]
+    try:
+        ob = await exchange.fetch_order_book(symbol, limit=20)
+        analysis = analyze_order_book_for_whales(ob, threshold)
+        if analysis and analysis['type'] == 'Buy Wall':
+             return {"strategy": f"Whale Radar ({analysis['value']/1000:.0f}K)", "entry_price": candidate['df_15m']['close'].iloc[-1]}
+    except Exception:
+        pass
+    return None
+
+ACTIVE_SCANNERS = {
+    "sniper_pro": run_sniper_pro_scan,
+    "momentum_breakout": run_momentum_breakout_scan,
+    "whale_radar": run_whale_radar_scan,
+}
+
+# =============================================================================
+# --- 📈 7. محرك المسح، إدارة الصفقات، والتتبع 📈 ---
+# =============================================================================
+
+async def perform_scan_and_trade(context: ContextTypes.DEFAULT_TYPE):
+    """الوظيفة الرئيسية التي تقوم بالمسح المتكامل وإدارة الصفقات."""
+    if not bot_state["settings"].get("background_tasks_enabled", True):
+        logger.info("Background tasks are disabled. Skipping scan.")
+        return
+        
+    if bot_state["scan_in_progress"]:
+        logger.warning("Scan is already in progress. Skipping.")
+        return
+    bot_state["scan_in_progress"] = True
+    logger.info("================== 🚀 Starting New Hybrid Scan Cycle 🚀 ==================")
+    
+    settings = bot_state["settings"]
+    try:
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        active_trades_count = cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'Active'").fetchone()[0]
+        conn.close()
+        
+        if active_trades_count >= settings["max_concurrent_trades"]:
+            logger.info(f"Max concurrent trades ({settings['max_concurrent_trades']}) reached. Skipping new signals scan.")
+        else:
+            for ex_id, exchange in bot_state["exchanges"].items():
+                if not exchange.markets: continue
+                
+                high_quality_candidates = await pre_scan_filter(exchange)
+                
+                for candidate in high_quality_candidates:
+                    for scanner_name in settings["active_scanners"]:
+                        scanner_func = ACTIVE_SCANNERS.get(scanner_name)
+                        if not scanner_func: continue
+                        
+                        signal = await scanner_func(exchange, candidate)
+                        
+                        if signal:
+                            now = time.time()
+                            if (now - bot_state["recently_alerted"].get(candidate['symbol'], 0)) < SCAN_INTERVAL_MINUTES * 60 * 2:
+                                logger.info(f"Skipping signal for {candidate['symbol']} due to cooldown.")
+                                continue
+
+                            await process_new_signal(context.bot, exchange, candidate['symbol'], signal)
+                            bot_state["recently_alerted"][candidate['symbol']] = now
+                            break
+    except Exception as e:
+        logger.error(f"Critical error during scan cycle: {e}", exc_info=True)
+    finally:
+        bot_state["scan_in_progress"] = False
+        logger.info("================== ✅ Hybrid Scan Cycle Finished ✅ ==================")
+
+async def process_new_signal(bot, exchange: ccxt.Exchange, symbol: str, signal: Dict):
+    """معالجة إشارة جديدة: حساب المخاطر، تسجيلها، وإرسال تنبيه."""
+    settings = bot_state["settings"]
+    entry_price = signal['entry_price']
+    
+    try:
+        ohlcv = await safe_fetch_ohlcv(exchange, symbol, '15m', 20)
+        if not ohlcv: return
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
+        
+        stop_loss = entry_price - (atr * settings["atr_sl_multiplier"])
+        take_profit = entry_price + ((entry_price - stop_loss) * settings["risk_reward_ratio"])
+    except Exception:
+        sl_percent = 2.0
+        stop_loss = entry_price * (1 - sl_percent / 100)
+        take_profit = entry_price * (1 + (sl_percent * settings["risk_reward_ratio"]) / 100)
+
+    try:
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO trades (timestamp, exchange, symbol, strategy, entry_price, initial_stop_loss, current_stop_loss, take_profit, trade_value_usdt, status, highest_price)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+            exchange.id.capitalize(), symbol, signal['strategy'], entry_price, stop_loss, stop_loss, take_profit,
+            settings['virtual_trade_size_usdt'], 'Active', entry_price
+        ))
+        trade_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        
+        message = (
+            f"🎯 **توصية صفقة جديدة** 🎯\n\n"
+            f"▫️ **العملة:** `{symbol}`\n"
+            f"▫️ **المنصة:** *{exchange.id.capitalize()}*\n"
+            f"▫️ **الاستراتيجية:** `{signal['strategy']}`\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"📈 **سعر الدخول:** `{format_price(entry_price)}`\n"
+            f"🎯 **الهدف:** `{format_price(take_profit)}`\n"
+            f"🛑 **الوقف:** `{format_price(stop_loss)}`\n\n"
+            f"*ID: {trade_id}*"
+        )
+        await bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+        logger.info(f"Successfully processed and sent signal for {symbol} (ID: {trade_id})")
 
     except Exception as e:
-        logger.warning(f"Could not analyze order book for {symbol}: {e}")
-    return signals
+        logger.error(f"Failed to process signal for {symbol}: {e}")
 
-def find_peaks(data, window):
-    """[NEW] دالة مبسطة لإيجاد القمم"""
-    return [i for i in range(window, len(data) - window) if data[i] == max(data[i-window:i+window+1])]
+async def track_active_trades(context: ContextTypes.DEFAULT_TYPE):
+    """متابعة الصفقات النشطة لتحديث وقف الخسارة المتحرك وتفعيل الأهداف."""
+    if not bot_state["settings"].get("background_tasks_enabled", True):
+        return
 
-def find_troughs(data, window):
-    """[NEW] دالة مبسطة لإيجاد القيعان"""
-    return [i for i in range(window, len(data) - window) if data[i] == min(data[i-window:i+window+1])]
+    settings = bot_state["settings"]
+    try:
+        conn = sqlite3.connect(DATABASE_FILE)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        active_trades = cursor.execute("SELECT * FROM trades WHERE status = 'Active'").fetchall()
+        conn.close()
+    except Exception as e:
+        logger.error(f"DB error in track_active_trades: {e}")
+        return
 
-def find_rsi_divergence(klines):
-    """[NEW] دالة للبحث عن الانفراج الإيجابي والسلبي"""
-    if not klines or len(klines) < 50:
-        return None
+    for trade_row in active_trades:
+        trade = dict(trade_row)
+        exchange = bot_state["exchanges"].get(trade['exchange'])
+        if not exchange: continue
+
+        current_price = await get_current_price(exchange, trade['symbol'])
+        if not current_price: continue
+
+        if current_price >= trade['take_profit']:
+            await close_trade(context.bot, trade, current_price, 'Take Profit Hit')
+            continue
+        if current_price <= trade['current_stop_loss']:
+            await close_trade(context.bot, trade, current_price, 'Stop Loss Hit')
+            continue
+
+        if settings["use_trailing_sl"]:
+            highest_price = max(trade['highest_price'], current_price)
+            if not trade['trailing_sl_active']:
+                activation_price = trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100)
+                if current_price >= activation_price:
+                    new_stop_loss = trade['entry_price']
+                    if new_stop_loss > trade['current_stop_loss']:
+                         await update_trade_sl(context.bot, trade['id'], new_stop_loss, highest_price, is_activation=True)
+            else:
+                new_stop_loss = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
+                if new_stop_loss > trade['current_stop_loss']:
+                    await update_trade_sl(context.bot, trade['id'], new_stop_loss, highest_price)
+            
+            if highest_price > trade['highest_price']:
+                 await update_trade_peak_price(trade['id'], highest_price)
+
+async def close_trade(bot, trade: Dict, exit_price: float, reason: str):
+    """إغلاق الصفقة وتحديث قاعدة البيانات وإرسال إشعار."""
+    pnl_usdt = (exit_price - trade['entry_price']) / trade['entry_price'] * trade['trade_value_usdt']
+    pnl_percent = pnl_usdt / trade['trade_value_usdt'] * 100
     
-    prices = np.array([float(k[4]) for k in klines])
-    rsi_values = calculate_rsi(prices, period=14)
-    if rsi_values is None:
-        # إذا كانت الدالة الأصلية ترجع قيمة واحدة، يجب أن نحسبها على شكل سلسلة
-        full_rsi = []
-        for i in range(14, len(prices)):
-            rsi = calculate_rsi(prices[:i+1])
-            if rsi: full_rsi.append(rsi)
-        if len(full_rsi) < 30 : return None
-        rsi_values = np.array(full_rsi)
-        prices = prices[-len(rsi_values):]
+    try:
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE trades SET status = ?, exit_price = ?, closed_at = ?, pnl_usdt = ?, pnl_percent = ? WHERE id = ?
+        """, ('Closed', exit_price, datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'), pnl_usdt, pnl_percent, trade['id']))
+        conn.commit()
+        conn.close()
 
-    # البحث عن آخر قمتين
-    price_peaks = find_peaks(prices, DIVERGENCE_PEAK_WINDOW)
-    rsi_peaks = find_peaks(rsi_values, DIVERGENCE_PEAK_WINDOW)
+        icon = "✅" if pnl_usdt >= 0 else "❌"
+        message = (
+            f"{icon} **تم إغلاق الصفقة #{trade['id']}** {icon}\n\n"
+            f"▫️ **العملة:** `{trade['symbol']}`\n"
+            f"▫️ **السبب:** *{reason}*\n"
+            f"▫️ **الربح/الخسارة:** `${pnl_usdt:+.2f}` (`{pnl_percent:+.2f}%`)"
+        )
+        await bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+        logger.info(f"Trade {trade['id']} ({trade['symbol']}) closed. Reason: {reason}. PnL: ${pnl_usdt:.2f}")
 
-    if len(price_peaks) >= 2 and len(rsi_peaks) >= 2:
-        p1_idx, p2_idx = price_peaks[-2], price_peaks[-1]
-        r1_idx, r2_idx = rsi_peaks[-2], rsi_peaks[-1]
+    except Exception as e:
+        logger.error(f"Failed to close trade {trade['id']}: {e}")
+
+async def update_trade_sl(bot, trade_id: int, new_sl: float, highest_price: float, is_activation: bool = False):
+    """تحديث وقف الخسارة في قاعدة البيانات وإرسال إشعار."""
+    try:
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE trades SET current_stop_loss = ?, highest_price = ?, trailing_sl_active = 1 WHERE id = ?", (new_sl, highest_price, trade_id))
+        conn.commit()
+        conn.close()
         
-        # التأكد من أن القمم متقاربة زمنياً
-        if abs(p2_idx - r2_idx) < DIVERGENCE_PEAK_WINDOW:
-            if prices[p2_idx] > prices[p1_idx] and rsi_values[r2_idx] < rsi_values[r1_idx]:
-                return {'type': 'Bearish', 'price_peak': prices[p2_idx]}
+        if is_activation:
+            message = f"🔒 **تأمين صفقة (ID: {trade_id})** 🔒\nتم نقل وقف الخسارة إلى نقطة الدخول: `{format_price(new_sl)}`"
+            await bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+            logger.info(f"Trailing SL activated for trade {trade_id}. New SL: {new_sl}")
+        else:
+             logger.info(f"Trailing SL updated for trade {trade_id}. New SL: {new_sl}")
+    except Exception as e:
+         logger.error(f"Failed to update SL for trade {trade_id}: {e}")
 
-    # البحث عن آخر قاعين
-    price_troughs = find_troughs(prices, DIVERGENCE_PEAK_WINDOW)
-    rsi_troughs = find_troughs(rsi_values, DIVERGENCE_PEAK_WINDOW)
+async def update_trade_peak_price(trade_id: int, highest_price: float):
+    """تحديث أعلى سعر وصلت إليه الصفقة فقط."""
+    try:
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to update peak price for trade {trade_id}: {e}")
 
-    if len(price_troughs) >= 2 and len(rsi_troughs) >= 2:
-        p1_idx, p2_idx = price_troughs[-2], price_troughs[-1]
-        r1_idx, r2_idx = rsi_troughs[-2], rsi_troughs[-1]
-
-        if abs(p2_idx - r2_idx) < DIVERGENCE_PEAK_WINDOW:
-            if prices[p2_idx] < prices[p1_idx] and rsi_values[r2_idx] > rsi_values[r1_idx]:
-                return {'type': 'Bullish', 'price_trough': prices[p2_idx]}
-
-    return None
-    
 # =============================================================================
-# --- 4. الوظائف التفاعلية (أوامر البوت) ---
+# --- 🔍 8. وظائف التحليل عند الطلب 🔍 ---
 # =============================================================================
-BTN_TA_PRO = "🔬 محلل فني"
-BTN_SCALP_SCAN = "⚡️ تحليل سريع"
-BTN_PRO_SCAN = "🎯 فحص احترافي"
-BTN_SNIPER_LIST = "🔭 قائمة القنص"
-BTN_GEM_HUNTER = "💎 صائد الجواهر"
-BTN_WHALE_RADAR = "🐋 رادار الحيتان"
-BTN_MOMENTUM = "🚀 كاشف الزخم"
-BTN_STATUS = "📊 الحالة"
-BTN_PERFORMANCE = "📈 تقرير الأداء"
-BTN_STRATEGY_STATS = "📊 أداء الاستراتيجيات" # [NEW]
-BTN_TOP_GAINERS = "📈 الأعلى ربحاً"
-BTN_TOP_LOSERS = "📉 الأعلى خسارة"
-BTN_TOP_VOLUME = "💰 الأعلى تداولاً"
-BTN_SELECT_MEXC = "MEXC"
-BTN_SELECT_GATEIO = "Gate.io"
-BTN_SELECT_BINANCE = "Binance"
-BTN_SELECT_BYBIT = "Bybit"
-BTN_SELECT_KUCOIN = "KuCoin"
-BTN_SELECT_OKX = "OKX"
-BTN_TASKS_ON = "🔴 إيقاف المهام"
-BTN_TASKS_OFF = "🟢 تفعيل المهام"
-
-def build_menu(context: ContextTypes.DEFAULT_TYPE):
-    user_data = context.user_data
-    bot_data = context.bot_data
-    selected_exchange = user_data.get('exchange', 'mexc')
-    tasks_enabled = bot_data.get('background_tasks_enabled', True)
-
-    mexc_btn = f"✅ {BTN_SELECT_MEXC}" if selected_exchange == 'mexc' else BTN_SELECT_MEXC
-    gate_btn = f"✅ {BTN_SELECT_GATEIO}" if selected_exchange == 'gate.io' else BTN_SELECT_GATEIO
-    binance_btn = f"✅ {BTN_SELECT_BINANCE}" if selected_exchange == 'binance' else BTN_SELECT_BINANCE
-    bybit_btn = f"✅ {BTN_SELECT_BYBIT}" if selected_exchange == 'bybit' else BTN_SELECT_BYBIT
-    kucoin_btn = f"✅ {BTN_SELECT_KUCOIN}" if selected_exchange == 'kucoin' else BTN_SELECT_KUCOIN
-    okx_btn = f"✅ {BTN_SELECT_OKX}" if selected_exchange == 'okx' else BTN_SELECT_OKX
-    toggle_tasks_btn = BTN_TASKS_ON if tasks_enabled else BTN_TASKS_OFF
-
-    keyboard = [
-        [BTN_PRO_SCAN, BTN_MOMENTUM, BTN_WHALE_RADAR],
-        [BTN_TA_PRO, BTN_SCALP_SCAN],
-        [BTN_GEM_HUNTER, BTN_SNIPER_LIST],
-        [BTN_TOP_GAINERS, BTN_TOP_VOLUME, BTN_TOP_LOSERS],
-        [BTN_PERFORMANCE, BTN_STRATEGY_STATS, BTN_STATUS], # [UPDATED]
-        [toggle_tasks_btn],
-        [mexc_btn, gate_btn, binance_btn],
-        [bybit_btn, kucoin_btn, okx_btn]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message:
-        save_user_id(update.message.chat_id)
-
-    context.user_data['exchange'] = 'mexc'
-    context.bot_data.setdefault('background_tasks_enabled', True)
-    welcome_message = (
-        "أهلاً بك في بوت الصياد الذكي!\n\n"
-        "أنا لست مجرد بوت تنبيهات، أنا مساعدك الاستراتيجي في عالم العملات الرقمية. مهمتي هي أن أمنحك ميزة على بقية السوق عبر ثلاث قدرات أساسية:\n\n"
-        "**🎯 1. أقتنص الفرص قبل الجميع (وحدة القناص):**\n"
-        "أراقب السوق بصمت وأبحث عن العملات التي تستعد للانفجار (الاختراق)، وأرسل لك تنبيهاً في لحظة الانطلاق المحتملة، مما يمنحك فرصة \"زيرو انعكاس\".\n\n"
-        "**🚀 2. أرصد الزخم الحالي (الكواشف):**\n"
-        "أخبرك بالعملات التي تشهد زخماً قوياً، أو نشاط حيتان، أو أنماطاً متكررة الآن، لتكون على دراية كاملة بما يحدث في السوق لحظة بلحظة.\n\n"
-        "**🔬 3. أحلل أي عملة تطلبها (المحلل الفني):**\n"
-        "أرسل لي رمز أي عملة (مثل BTC)، وسأقدم لك تقريباً فنياً مفصلاً عنها على عدة أطر زمنية في ثوانٍ, لمساعدتك في اتخاذ قراراتك.\n\n"
-        "**كيف تبدأ؟**\n"
-        "استخدم لوحة الأزرار أدناه لاستكشاف السوق والبدء في الصيد.\n\n"
-        "⚠️ **تنبيه هام:** أنا أداة للمساعدة والتحليل فقط، ولست مستشاراً مالياً. التداول ينطوي على مخاطر عالية، وقراراتك تقع على عاتقك بالكامل."
-    )
-    if update.message:
-        await update.message.reply_text(welcome_message, reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
-
-async def set_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE, exchange_name: str):
-    context.user_data['exchange'] = exchange_name.lower()
-    await update.message.reply_text(f"✅ تم تحويل المنصة بنجاح. المنصة النشطة الآن هي: **{exchange_name}**", reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
-
-async def toggle_background_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tasks_enabled = context.bot_data.get('background_tasks_enabled', True)
-    context.bot_data['background_tasks_enabled'] = not tasks_enabled
-    status = "تفعيل" if not tasks_enabled else "إيقاف"
-    await update.message.reply_text(f"✅ تم **{status}** المهام الخلفية.", reply_markup=build_menu(context), parse_mode=ParseMode.MARKDOWN)
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tasks_enabled = context.bot_data.get('background_tasks_enabled', True)
-    registered_users = len(load_user_ids())
-    message = f"📊 **حالة البوت** 📊\n\n"
-    message += f"**- المستخدمون المسجلون:** `{registered_users}`\n"
-    message += f"**- المهام الخلفية:** {'🟢 نشطة' if tasks_enabled else '🔴 متوقفة'}\n\n"
-
-    for platform in PLATFORMS:
-        hunts_count = len(active_hunts.get(platform, {}))
-        perf_count = len(performance_tracker.get(platform, {}))
-        sniper_count = len(sniper_watchlist.get(platform, {}))
-        retest_count = len(sniper_retest_watchlist.get(platform, {})) # [NEW]
-        sniper_tracked_count = len(sniper_tracker.get(platform, {}))
-        message += f"**منصة {platform}:**\n"
-        message += f"    - 🎯 الصفقات المراقبة: {hunts_count}\n"
-        message += f"    - 📈 الأداء المتتبع: {perf_count}\n"
-        message += f"    - 🔭 أهداف القناص: {sniper_count}\n"
-        message += f"    - 🎯 أهداف إعادة الاختبار: {retest_count}\n" # [NEW]
-        message += f"    - 🔫 نتائج القناص: {sniper_tracked_count}\n\n"
-    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
-
-async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text: return
-    text = update.message.text.strip()
-
-    if context.user_data.get('awaiting_symbol_for_ta'):
-        symbol = text.upper()
-        if not symbol.endswith("USDT"): symbol += "USDT"
-        context.user_data['awaiting_symbol_for_ta'] = False
-        context.args = [symbol]
-        await run_full_technical_analysis(update, context)
-        return
-
-    if context.user_data.get('awaiting_symbol_for_scalp'):
-        symbol = text.upper()
-        if not symbol.endswith("USDT"): symbol += "USDT"
-        context.user_data['awaiting_symbol_for_scalp'] = False
-        context.args = [symbol]
-        await run_scalp_analysis(update, context)
-        return
-
-    button_text = text.replace("✅ ", "")
-
-    if button_text == BTN_TA_PRO:
-        context.user_data['awaiting_symbol_for_ta'] = True
-        await update.message.reply_text("🔬 يرجى إرسال رمز العملة للتحليل المعمق (مثال: `BTC` أو `SOLUSDT`)", parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if button_text == BTN_SCALP_SCAN:
-        context.user_data['awaiting_symbol_for_scalp'] = True
-        await update.message.reply_text("⚡️ يرجى إرسال رمز العملة للتحليل السريع (مثال: `PEPE` أو `WIFUSDT`)", parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if button_text == BTN_SNIPER_LIST:
-        await show_sniper_watchlist(update, context)
-        return
-
-    if button_text in [BTN_SELECT_MEXC, BTN_SELECT_GATEIO, BTN_SELECT_BINANCE, BTN_SELECT_BYBIT, BTN_SELECT_KUCOIN, BTN_SELECT_OKX]:
-        await set_exchange(update, context, button_text)
-        return
-    if button_text in [BTN_TASKS_ON, BTN_TASKS_OFF]:
-        await toggle_background_tasks(update, context)
-        return
-    if button_text == BTN_STATUS:
-        await status_command(update, context)
-        return
-    if button_text == BTN_STRATEGY_STATS: # [NEW]
-        await show_strategy_stats(update, context)
-        return
-
-    chat_id = update.message.chat_id
-    session = context.application.bot_data['session']
-    current_exchange = context.user_data.get('exchange', 'mexc')
-    client = get_exchange_client(current_exchange, session)
-    if not client:
-        await update.message.reply_text("حدث خطأ في اختيار المنصة. يرجى المحاولة مرة أخرى.")
-        return
-
-    sent_message = await context.bot.send_message(chat_id=chat_id, text=f"🔍 جارِ تنفيذ طلبك على منصة {client.name}...")
-
-    task_coro = None
-    if button_text == BTN_MOMENTUM: task_coro = run_momentum_detector(context, chat_id, sent_message.message_id, client)
-    elif button_text == BTN_WHALE_RADAR: task_coro = run_whale_radar_scan(context, chat_id, sent_message.message_id, client)
-    elif button_text == BTN_PRO_SCAN: task_coro = run_pro_scan(context, chat_id, sent_message.message_id, client)
-    elif button_text == BTN_PERFORMANCE: task_coro = get_performance_report(context, chat_id, sent_message.message_id)
-    elif button_text == BTN_TOP_GAINERS: task_coro = run_top_gainers(context, chat_id, sent_message.message_id, client)
-    elif button_text == BTN_TOP_LOSERS: task_coro = run_top_losers(context, chat_id, sent_message.message_id, client)
-    elif button_text == BTN_TOP_VOLUME: task_coro = run_top_volume(context, chat_id, sent_message.message_id, client)
-    elif button_text == BTN_GEM_HUNTER: task_coro = run_gem_hunter_scan(context, chat_id, sent_message.message_id, client)
-
-    if task_coro:
-        asyncio.create_task(task_coro)
-
-async def send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, **kwargs):
-    if len(text) <= TELEGRAM_MESSAGE_LIMIT:
-        await context.bot.send_message(chat_id=chat_id, text=text, **kwargs)
-        return
-
-    parts = []
-    current_part = ""
-    for line in text.split('\n'):
-        if len(current_part) + len(line) + 1 > TELEGRAM_MESSAGE_LIMIT:
-            parts.append(current_part)
-            current_part = ""
-        current_part += line + '\n'
-    if current_part:
-        parts.append(current_part)
-
-    for part in parts:
-        await context.bot.send_message(chat_id=chat_id, text=part, **kwargs)
-        await asyncio.sleep(0.5)
-
 async def run_full_technical_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
-    symbol = context.args[0]
+    try:
+        symbol = context.args[0].upper()
+        if not symbol.endswith('/USDT'):
+            symbol += '/USDT'
+    except IndexError:
+        await update.message.reply_text("يرجى إرسال رمز العملة بعد الأمر. مثال: `/ta BTC`")
+        return
 
-    current_exchange = context.user_data.get('exchange', 'mexc')
-    client = get_exchange_client(current_exchange, context.application.bot_data['session'])
+    ex_id = "Binance"
+    exchange = bot_state["exchanges"].get(ex_id)
+    if not exchange:
+        await update.message.reply_text(f"لم يتم العثور على منصة {ex_id}.")
+        return
 
-    sent_message = await context.bot.send_message(chat_id=chat_id, text=f"🔬 جارِ إجراء تحليل فني شامل لـ ${symbol} على {client.name}...")
+    sent_message = await context.bot.send_message(chat_id=chat_id, text=f"🔬 جارِ إجراء تحليل فني شامل لـ ${symbol} على {exchange.id}...")
 
     try:
         timeframes = {'يومي': '1d', '4 ساعات': '4h', 'ساعة': '1h'}
-        tf_weights = {'يومي': 3, '4 ساعات': 2, 'ساعة': 1}
-        report_parts, overall_score = [], 0
-        header = f"📊 **التحليل الفني المفصل لـ ${symbol}** ({client.name})\n_{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_\n\n"
+        report_parts = [f"📊 **التحليل الفني المفصل لـ ${symbol}** ({exchange.id})\n"]
         
         for tf_name, tf_interval in timeframes.items():
-            klines = await client.get_processed_klines(symbol, tf_interval, TA_KLINE_LIMIT)
+            ohlcv = await safe_fetch_ohlcv(exchange, symbol, tf_interval, 200)
             tf_report = f"--- **إطار {tf_name}** ---\n"
-            if not klines or len(klines) < TA_MIN_KLINE_COUNT:
-                tf_report += "لا توجد بيانات كافية للتحليل.\n\n"; report_parts.append(tf_report); continue
+            if not ohlcv or len(ohlcv) < 100:
+                tf_report += "لا توجد بيانات كافية للتحليل.\n\n"
+                report_parts.append(tf_report)
+                continue
             
-            close_prices = np.array([float(k[4]) for k in klines[-TA_KLINE_LIMIT:]])
-            high_prices = np.array([float(k[2]) for k in klines[-TA_KLINE_LIMIT:]])
-            low_prices = np.array([float(k[3]) for k in klines[-TA_KLINE_LIMIT:]])
-            current_price = close_prices[-1]
-            report_lines, weight = [], tf_weights[tf_name]
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            current_price = df['close'].iloc[-1]
+            report_lines = []
+            
+            ema21 = ta.ema(df['close'], length=21).iloc[-1]
+            ema50 = ta.ema(df['close'], length=50).iloc[-1]
+            sma100 = ta.sma(df['close'], length=100).iloc[-1]
+            trend_text, _ = analyze_trend(current_price, ema21, ema50, sma100)
+            report_lines.append(f"**الاتجاه:** {trend_text}")
+            
+            macd = df.ta.macd(fast=12, slow=26, signal=9)
+            if macd is not None and not macd.empty:
+                 if macd.iloc[-1]['MACD_12_26_9'] > macd.iloc[-1]['MACDs_12_26_9']: report_lines.append("🟢 **MACD:** إيجابي.")
+                 else: report_lines.append("🔴 **MACD:** سلبي.")
 
-            ema21, ema50, sma100 = calculate_ema(close_prices, 21), calculate_ema(close_prices, 50), calculate_sma(close_prices, 100)
-            trend_text, trend_score = analyze_trend(current_price, ema21, ema50, sma100)
-            report_lines.append(f"**الاتجاه:** {trend_text}"); overall_score += trend_score * weight
-
-            macd_line, signal_line = calculate_macd(close_prices)
-            if macd_line is not None and signal_line is not None:
-                if macd_line > signal_line: report_lines.append(f"🟢 **MACD:** إيجابي."); overall_score += 1 * weight
-                else: report_lines.append(f"🔴 **MACD:** سلبي."); overall_score -= 1 * weight
-
-            rsi = calculate_rsi(close_prices)
+            rsi = ta.rsi(df['close'], length=14).iloc[-1]
             if rsi:
-                if rsi > 70: report_lines.append(f"🔴 **RSI ({rsi:.1f}):** تشبع شرائي."); overall_score -= 1 * weight
-                elif rsi < 30: report_lines.append(f"🟢 **RSI ({rsi:.1f}):** تشبع بيعي."); overall_score += 1 * weight
+                if rsi > 70: report_lines.append(f"🔴 **RSI ({rsi:.1f}):** تشبع شرائي.")
+                elif rsi < 30: report_lines.append(f"🟢 **RSI ({rsi:.1f}):** تشبع بيعي.")
                 else: report_lines.append(f"🟡 **RSI ({rsi:.1f}):** محايد.")
 
-            supports, resistances = find_support_resistance(high_prices, low_prices)
-            next_res = min([r for r in resistances if r > current_price], default=None)
-            if next_res: report_lines.append(f"🛡️ **أقرب مقاومة:** {format_price(next_res)}")
-            next_sup = max([s for s in supports if s < current_price], default=None)
-            if next_sup: report_lines.append(f"💰 **أقرب دعم:** {format_price(next_sup)}")
-            else: report_lines.append("💰 **أقرب دعم:** لا يوجد دعم واضح أدناه.")
-
-            fib_levels = calculate_fibonacci_retracement(high_prices, low_prices)
-            if fib_levels:
-                report_lines.append(f"🎚️ **فيبوناتشي:** 0.5: `{format_price(fib_levels['level_0.5'])}` | 0.618: `{format_price(fib_levels['level_0.618'])}`")
+            supports, resistances = find_support_resistance(df['high'].to_numpy(), df['low'].to_numpy())
+            if r := min([r for r in resistances if r > current_price], default=None): report_lines.append(f"🛡️ **أقرب مقاومة:** {format_price(r)}")
+            if s := max([s for s in supports if s < current_price], default=None): report_lines.append(f"💰 **أقرب دعم:** {format_price(s)}")
 
             tf_report += "\n".join(report_lines) + f"\n*السعر الحالي: {format_price(current_price)}*\n\n"
             report_parts.append(tf_report)
-
-        summary_report = "--- **ملخص التحليل الذكي** ---\n"
-        if overall_score >= 5: summary_report += f"🟢 **التحليل العام يميل للإيجابية بقوة (النقاط: {overall_score}).**"
-        elif overall_score > 0: summary_report += f"🟢 **التحليل العام يميل للإيجابية (النقاط: {overall_score}).**"
-        elif overall_score <= -5: summary_report += f"🔴 **التحليل العام يميل للسلبية بقوة (النقاط: {overall_score}).**"
-        elif overall_score < 0: summary_report += f"🔴 **التحليل العام يميل للسلبية (النقاط: {overall_score}).**"
-        else: summary_report += f"🟡 **السوق في حيرة، الإشارات متضاربة (النقاط: {overall_score}).**"
-        report_parts.append(summary_report)
-
-        await context.bot.delete_message(chat_id=chat_id, message_id=sent_message.message_id)
-        await send_long_message(context, chat_id, header + "".join(report_parts), parse_mode=ParseMode.MARKDOWN)
+        
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text="".join(report_parts), parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
-        logger.error(f"Error in full technical analysis for {symbol}: {e}", exc_info=True)
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ فادح أثناء تحليل {symbol}.")
+        logger.error(f"Error in full TA for {symbol}: {e}", exc_info=True)
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ أثناء تحليل {symbol}. تأكد من صحة الرمز.")
 
 async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
-    symbol = context.args[0]
-    current_exchange = context.user_data.get('exchange', 'mexc')
-    client = get_exchange_client(current_exchange, context.application.bot_data['session'])
-    sent_message = await context.bot.send_message(chat_id=chat_id, text=f"⚡️ جارِ إجراء تحليل سريع لـ ${symbol} على {client.name}...")
+    try:
+        symbol = context.args[0].upper()
+        if not symbol.endswith('/USDT'):
+            symbol += '/USDT'
+    except IndexError:
+        await update.message.reply_text("يرجى إرسال رمز العملة. مثال: `/scalp PEPE`")
+        return
+
+    ex_id = "Binance" 
+    exchange = bot_state["exchanges"].get(ex_id)
+    if not exchange:
+        await update.message.reply_text(f"لم يتم العثور على منصة {ex_id}.")
+        return
+
+    sent_message = await context.bot.send_message(chat_id=chat_id, text=f"⚡️ جارِ إجراء تحليل سريع لـ ${symbol} على {exchange.id}...")
 
     try:
-        timeframes = {'15 دقيقة': '15m', '5 دقائق': '5m', 'دقيقة': '1m'}
-        report_parts, overall_score = [], 0
-        header = f"⚡️ **التحليل السريع لـ ${symbol}** ({client.name})\n_{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_\n\n"
+        timeframes = {'15 دقيقة': '15m', '5 دقائق': '5m'}
+        report_parts = [f"⚡️ **التحليل السريع لـ ${symbol}** ({exchange.id})\n"]
         
         for tf_name, tf_interval in timeframes.items():
-            klines = await client.get_processed_klines(symbol, tf_interval, SCALP_KLINE_LIMIT)
-            tf_report, report_lines = f"--- **إطار {tf_name}** ---\n", []
-            if not klines or len(klines) < 20:
-                tf_report += "لا توجد بيانات كافية.\n\n"; report_parts.append(tf_report); continue
+            ohlcv = await safe_fetch_ohlcv(exchange, symbol, tf_interval, 50)
+            tf_report = f"--- **إطار {tf_name}** ---\n"
+            if not ohlcv or len(ohlcv) < 20:
+                tf_report += "لا توجد بيانات كافية.\n\n"
+                report_parts.append(tf_report)
+                continue
 
-            volumes, close_prices = np.array([float(k[5]) for k in klines]), np.array([float(k[4]) for k in klines])
-            avg_volume, last_volume = np.mean(volumes[-20:-1]), volumes[-1]
-
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            
+            avg_volume = df['volume'][-20:-1].mean()
+            last_volume = df['volume'].iloc[-1]
             if avg_volume > 0:
-                if last_volume > avg_volume * 3: report_lines.append(f"🟢 **الفوليوم:** عالٍ جداً ({last_volume/avg_volume:.1f}x)."); overall_score += 2
-                elif last_volume > avg_volume * 1.5: report_lines.append(f"🟢 **الفوليوم:** جيد ({last_volume/avg_volume:.1f}x)."); overall_score += 1
-                else: report_lines.append("🟡 **الفوليوم:** عادي.")
-            else: report_lines.append("🟡 **الفوليوم:** لا توجد بيانات.")
+                vol_ratio = last_volume / avg_volume
+                if vol_ratio > 3: tf_report += f"🟢 **الفوليوم:** عالٍ جداً ({vol_ratio:.1f}x).\n"
+                else: tf_report += "🟡 **الفوليوم:** عادي.\n"
 
-            price_change_5_candles = ((close_prices[-1] - close_prices[-5]) / close_prices[-5]) * 100 if close_prices[-5] > 0 else 0
-            if price_change_5_candles > 2.0: report_lines.append(f"🟢 **السعر:** حركة صاعدة قوية (`%{price_change_5_candles:+.1f}`)."); overall_score += 1
-            elif price_change_5_candles < -2.0: report_lines.append(f"🔴 **السعر:** حركة هابطة قوية (`%{price_change_5_candles:+.1f}`)."); overall_score -= 1
-            else: report_lines.append("🟡 **السعر:** حركة عادية.")
-
-            tf_report += "\n".join(report_lines) + f"\n*السعر الحالي: {format_price(close_prices[-1])}*\n\n"
+            price_change = ((df['close'].iloc[-1] - df['close'].iloc[-5]) / df['close'].iloc[-5]) * 100
+            if price_change > 2.0: tf_report += f"🟢 **السعر:** حركة صاعدة قوية (`%{price_change:+.1f}`).\n"
+            elif price_change < -2.0: tf_report += f"🔴 **السعر:** حركة هابطة قوية (`%{price_change:+.1f}`).\n"
+            else: tf_report += "🟡 **السعر:** حركة عادية.\n"
             report_parts.append(tf_report)
 
-        summary_report = "--- **ملخص الزخم** ---\n"
-        if overall_score >= 4: summary_report += "🟢 **الزخم الحالي قوي جداً ومستمر.**"
-        elif overall_score >= 2: summary_report += "🟢 **يوجد زخم إيجابي جيد.**"
-        elif overall_score <= -2: summary_report += "🔴 **يوجد زخم سلبي واضح.**"
-        else: summary_report += "🟡 **الزخم الحالي ضعيف أو غير واضح.**"
-        report_parts.append(summary_report)
-
-        await context.bot.delete_message(chat_id=chat_id, message_id=sent_message.message_id)
-        await send_long_message(context, chat_id, header + "".join(report_parts), parse_mode=ParseMode.MARKDOWN)
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text="".join(report_parts), parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
-        logger.error(f"Error in scalp analysis for {symbol}: {e}", exc_info=True)
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ فادح أثناء تحليل {symbol}.")
+        logger.error(f"Error in scalp analysis for {symbol}: {e}")
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ أثناء تحليل {symbol}.")
 
-async def run_pro_scan(context, chat_id, message_id, client: BaseExchangeClient):
-    initial_text = f"🎯 **الفحص الاحترافي المطور ({client.name})**\n\n🔍 جارِ تحليل السوق وتصنيف العملات..."
-    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
-    except Exception: pass
-
-    try:
-        market_data = await client.get_market_data()
-        if not market_data:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق."); return
-
-        candidates = [p['symbol'] for p in market_data if MOMENTUM_MIN_VOLUME_24H <= float(p.get('quoteVolume', '0')) <= MOMENTUM_MAX_VOLUME_24H and float(p.get('lastPrice', '1')) <= MOMENTUM_MAX_PRICE]
-        if not candidates:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **الفحص الاحترافي على {client.name} اكتمل:**\n\nلا توجد عملات مرشحة حالياً."); return
-
-        tasks = [calculate_pro_score(client, symbol) for symbol in candidates[:100]]
-        results = await asyncio.gather(*tasks)
-        strong_opportunities = [dict(details, **{'symbol': candidates[i]}) for i, (score, details) in enumerate(results) if score >= PRO_SCAN_MIN_SCORE]
-
-        if not strong_opportunities:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **الفحص الاحترافي على {client.name} اكتمل:**\n\nلم يتم العثور على فرص قوية."); return
-
-        sorted_ops = sorted(strong_opportunities, key=lambda x: x['Final Score'], reverse=True)
-        message = f"🎯 **أفضل الفرص حسب النقاط ({client.name})** 🎯\n\n"
-        for i, coin_details in enumerate(sorted_ops[:5]):
-            message += (f"**{i+1}. ${coin_details['symbol'].replace('USDT', '')}**\n"
-                        f"    - **النقاط:** `{coin_details['Final Score']}` ⭐\n"
-                        f"    - **السعر:** `${format_price(coin_details.get('Price', 'N/A'))}`\n"
-                        f"    - **الاتجاه:** `{coin_details.get('Trend', 'N/A')}`\n"
-                        f"    - **الزخم:** `{coin_details.get('Momentum', 'N/A')}`\n\n")
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Error in pro_scan on {client.name}: {e}", exc_info=True)
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ فادح أثناء الفحص الاحترافي.")
-
-async def run_momentum_detector(context, chat_id, message_id, client: BaseExchangeClient):
-    initial_text = f"🚀 **كاشف الزخم المطور ({client.name})**\n\n🔍 جارِ الفحص الكمّي للسوق..."
-    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
-    except Exception: pass
+async def run_gem_hunter_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """[UPGRADED] Scans all connected exchanges for potential gems."""
+    await update.message.reply_text("💎 **صائد الجواهر الشامل**\n\n🔍 جارِ تنفيذ مسح عميق على جميع المنصات...")
     
-    momentum_coins = await helper_get_advanced_momentum(client)
-    if not momentum_coins:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **فحص الزخم على {client.name} اكتمل:** لا يوجد زخم قوي حالياً."); return
+    settings = bot_state["settings"]
+    listing_since = datetime.now(timezone.utc) - timedelta(days=settings["gem_listing_since_days"])
     
-    message = f"🚀 **تقرير الزخم الكمّي ({client.name})** 🚀\n\n"
-    for i, coin in enumerate(momentum_coins[:5]):
-        price_change_str = f"`%{coin['price_change']:.2f}`" if 'price_change' in coin else "N/A"
-        message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n"
-                    f"    - **نقاط الزخم:** `{coin['score']}` ⭐\n"
-                    f"    - السعر الحالي: `${format_price(coin['current_price'])}`\n"
-                    f"    - التغير (60د): {price_change_str}\n\n")
-    message += "*(تمت إضافة هذه العملات إلى متتبع الأداء.)*"
-    await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
-    
-    now = datetime.now(UTC)
-    for coin in momentum_coins[:5]:
-        add_to_monitoring(coin['symbol'], float(coin['current_price']), 0, now, "Fomo Hunter", client.name)
+    all_platform_gems = {}
 
-async def run_whale_radar_scan(context, chat_id, message_id, client: BaseExchangeClient):
-    initial_text = f"🐋 **رادار الحيتان ({client.name})**\n\n🔍 جارِ الفحص العميق..."
-    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
-    except Exception: pass
+    async def scan_exchange_for_gems(ex_id, exchange):
+        try:
+            tickers = await exchange.fetch_tickers()
+            if not tickers: return []
 
-    whale_signals_by_symbol = await helper_get_whale_activity(client)
-    if not whale_signals_by_symbol:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **فحص الرادار على {client.name} اكتمل:** لا يوجد نشاط حيتان واضح."); return
-    
-    message = f"🐋 **تقرير رادار الحيتان ({client.name}) - {datetime.now().strftime('%H:%M:%S')}** 🐋\n\n"
-    for symbol, signals in whale_signals_by_symbol.items():
-        for signal in signals:
-            if signal['type'] == 'Buy Wall':
-                message += f"🟢 **حائط شراء على ${symbol.replace('USDT', '')}**\n    - الحجم: `${signal['value']:,.0f}` عند `{format_price(signal['price'])}`\n\n"
-            elif signal['type'] == 'Sell Wall':
-                message += f"🔴 **حائط بيع على ${symbol.replace('USDT', '')}**\n    - الحجم: `${signal['value']:,.0f}` عند `{format_price(signal['price'])}`\n\n"
-            elif signal['type'] == 'Buy Pressure':
-                message += f"📈 **ضغط شراء على ${symbol.replace('USDT', '')}**\n    - اختلال الدفتر: `%{signal['value']:.2f}`\n\n"
-    await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
+            platform_gems = []
+            for symbol, ticker in tickers.items():
+                if not symbol.endswith('/USDT') or not ticker.get('quoteVolume') or ticker['quoteVolume'] < settings["gem_min_24h_volume_usdt"]:
+                    continue
 
-async def get_performance_report(context, chat_id, message_id):
-    try:
-        if not any(performance_tracker.values()) and not any(sniper_tracker.values()):
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="ℹ️ لا توجد عملات قيد تتبع الأداء حالياً."); return
+                ohlcv = await safe_fetch_ohlcv(exchange, symbol, '1d', 1000) # Fetch more data for history
+                if not ohlcv or len(ohlcv) < 30: continue
+                
+                # Robust listing date check
+                first_candle_time = datetime.fromtimestamp(ohlcv[0][0] / 1000, timezone.utc)
+                if first_candle_time < listing_since: continue
 
-        message = "📊 **تقرير الأداء الشامل** 📊\n\n"
-        
-        all_tracked_items = []
-        for platform_name, symbols_data in performance_tracker.items():
-            for symbol, data in symbols_data.items():
-                if data.get('status') != 'Archived':
-                    all_tracked_items.append((symbol, dict(data, **{'exchange': platform_name})))
-        
-        if all_tracked_items:
-            message += "📈 **أداء عملات الزخم** 📈\n\n"
-            sorted_symbols = sorted(all_tracked_items, key=lambda item: item[1]['alert_time'], reverse=True)
-            for symbol, data in sorted_symbols:
-                alert_price = data.get('alert_price',0)
-                current_price = data.get('current_price', alert_price)
-                high_price = data.get('high_price', alert_price)
-                current_change = ((current_price - alert_price) / alert_price) * 100 if alert_price > 0 else 0
-                peak_change = ((high_price - alert_price) / alert_price) * 100 if alert_price > 0 else 0
-                emoji = "🟢" if current_change >= 0 else "🔴"
-                time_since = (datetime.now(UTC) - data['alert_time']).total_seconds()
-                time_str = f"{int(time_since/3600)} س و {int((time_since % 3600)/60)} د"
-                message += (f"{emoji} **${symbol.replace('USDT','')}** ({data.get('exchange', 'N/A')}) (منذ {time_str})\n"
-                            f"    - الحالي: `${format_price(current_price)}` (**{current_change:+.2f}%**)\n"
-                            f"    - الأعلى: `${format_price(high_price)}` (**{peak_change:+.2f}%**)\n\n")
-
-        all_sniper_items = []
-        for platform_name, symbols_data in sniper_tracker.items():
-            for symbol, data in symbols_data.items():
-                if data.get('status') == 'Tracking':
-                    all_sniper_items.append((symbol, dict(data, **{'exchange': platform_name})))
-
-        if all_sniper_items:
-            message += "\n\n🔫 **متابعة نتائج القناص** 🔫\n\n"
-            sorted_sniper = sorted(all_sniper_items, key=lambda item: item[1]['alert_time'], reverse=True)
-            for symbol, data in sorted_sniper:
-                time_since = (datetime.now(UTC) - data['alert_time']).total_seconds()
-                time_str = f"{int(time_since/3600)} س و {int((time_since % 3600)/60)} د"
-                message += (f"🎯 **${symbol.replace('USDT','')}** ({data.get('exchange', 'N/A')}) (منذ {time_str})\n"
-                            f"    - **الحالة:** `قيد المتابعة`\n"
-                            f"    - **الهدف:** `{format_price(data['target_price'])}`\n"
-                            f"    - **نقطة الفشل:** `{format_price(data['invalidation_price'])}`\n\n")
-
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        await send_long_message(context, chat_id, message, parse_mode=ParseMode.MARKDOWN)
-
-    except Exception as e:
-        logger.error(f"Error in get_performance_report: {e}", exc_info=True)
-        try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ أثناء جلب تقرير الأداء.")
-        except Exception: pass
-
-async def run_top_gainers(context, chat_id, message_id, client: BaseExchangeClient):
-    try:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"📈 **الأعلى ربحاً ({client.name})**\n\n🔍 جارِ جلب البيانات...")
-        market_data = await client.get_market_data()
-        if not market_data: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق."); return
-        valid_data = [item for item in market_data if float(item.get('quoteVolume','0')) > MARKET_MOVERS_MIN_VOLUME]
-        sorted_data = sorted(valid_data, key=lambda x: x.get('priceChangePercent',0), reverse=True)[:10]
-        message = f"📈 **الأعلى ربحاً على {client.name}** 📈\n\n"
-        for i, coin in enumerate(sorted_data):
-            message += f"**{i+1}. ${coin['symbol'].replace('USDT','')}:** `%{coin.get('priceChangePercent',0):+.2f}`\n"
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e: logger.error(f"Error in top gainers: {e}")
-
-async def run_top_losers(context, chat_id, message_id, client: BaseExchangeClient):
-    try:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"📉 **الأعلى خسارة ({client.name})**\n\n🔍 جارِ جلب البيانات...")
-        market_data = await client.get_market_data()
-        if not market_data: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق."); return
-        valid_data = [item for item in market_data if float(item.get('quoteVolume','0')) > MARKET_MOVERS_MIN_VOLUME]
-        sorted_data = sorted(valid_data, key=lambda x: x.get('priceChangePercent',0))[:10]
-        message = f"📉 **الأعلى خسارة على {client.name}** 📉\n\n"
-        for i, coin in enumerate(sorted_data):
-            message += f"**{i+1}. ${coin['symbol'].replace('USDT','')}:** `%{coin.get('priceChangePercent',0):+.2f}`\n"
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e: logger.error(f"Error in top losers: {e}")
-
-async def run_top_volume(context, chat_id, message_id, client: BaseExchangeClient):
-    try:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💰 **الأعلى تداولاً ({client.name})**\n\n🔍 جارِ جلب البيانات...")
-        market_data = await client.get_market_data()
-        if not market_data: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق."); return
-        for item in market_data: item['quoteVolume_f'] = float(item.get('quoteVolume','0'))
-        sorted_data = sorted(market_data, key=lambda x: x['quoteVolume_f'], reverse=True)[:10]
-        message = f"💰 **الأعلى تداولاً على {client.name}** 💰\n\n"
-        for i, coin in enumerate(sorted_data):
-            volume = coin['quoteVolume_f']
-            volume_str = f"{volume/1_000_000:.2f}M" if volume > 1_000_000 else f"{volume/1_000:.1f}K"
-            message += f"**{i+1}. ${coin['symbol'].replace('USDT','')}:** (الحجم: `${volume_str}`)\n"
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e: logger.error(f"Error in top volume: {e}")
-
-async def show_sniper_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message, any_watched = "🔭 **قائمة مراقبة القناص** 🔭\n\n", False
-    for platform, watchlist in sniper_watchlist.items():
-        if watchlist:
-            any_watched = True
-            message += f"--- **{platform}** ---\n"
-            for symbol, data in list(watchlist.items())[:5]:
-                poc_str = f", POC: `{format_price(data['poc'])}`" if 'poc' in data else ""
-                message += (f"- `${symbol.replace('USDT','')}` (نطاق: "
-                            f"`{format_price(data['low'])}` - `{format_price(data['high'])}`{poc_str})\n")
-            if len(watchlist) > 5: message += f"    *... و {len(watchlist) - 5} عملات أخرى.*\n"
-            message += "\n"
-    if not any_watched: message += "لا توجد أهداف حالية في قائمة المراقبة. يقوم الرادار بالبحث..."
-    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
-
-async def run_gem_hunter_scan(context, chat_id, message_id, client: BaseExchangeClient):
-    initial_text = f"💎 **صائد الجواهر ({client.name})**\n\n🔍 جارِ تنفيذ مسح عميق للسوق..."
-    try: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=initial_text)
-    except Exception: pass
-
-    try:
-        market_data = await client.get_market_data()
-        if not market_data: await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ في جلب بيانات السوق."); return
-        
-        final_gems = []
-        for coin in [c for c in market_data if float(c.get('quoteVolume', '0')) > GEM_MIN_24H_VOLUME_USDT]:
-            try:
-                klines = await client.get_processed_klines(coin['symbol'], '1d', 1000)
-                if not klines or len(klines) < 10: continue
-                if datetime.fromtimestamp(int(klines[0][0])/1000, tz=UTC) < GEM_LISTING_SINCE_DATE: continue
-
-                highs, lows, closes = [float(k[2]) for k in klines], [float(k[3]) for k in klines], [float(k[4]) for k in klines]
-                ath, atl, current = np.max(highs), np.min(lows), closes[-1]
-                if ath == 0 or current == 0: continue
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                ath, atl, current = df['high'].max(), df['low'].min(), df['close'].iloc[-1]
+                
+                if not all([ath, atl, current]) or ath == 0 or atl == 0: continue
 
                 correction = ((current - ath) / ath) * 100
-                rise_from_atl = ((current - atl) / atl) * 100 if atl > 0 else float('inf')
-                if correction <= GEM_MIN_CORRECTION_PERCENT and rise_from_atl >= GEM_MIN_RISE_FROM_ATL_PERCENT and current > np.mean(closes[-20:]):
-                    final_gems.append({'symbol': coin['symbol'], 'potential_x': ath / current, 'correction_percent': correction})
-            except Exception as e: logger.warning(f"Could not process gem candidate {coin['symbol']}: {e}")
+                rise_from_atl = ((current - atl) / atl) * 100
+                
+                if correction <= settings["gem_min_correction_percent"] and rise_from_atl >= settings["gem_min_rise_from_atl_percent"]:
+                    platform_gems.append({'symbol': symbol, 'potential_x': ath / current, 'correction_percent': correction})
+            
+            return sorted(platform_gems, key=lambda x: x['potential_x'], reverse=True)[:10] # Return top 10
+        except Exception as e:
+            logger.error(f"Error scanning gems on {ex_id}: {e}")
+            return []
 
-        if not final_gems:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ **بحث الجواهر اكتمل:** لم يتم العثور على عملات تتوافق مع الشروط."); return
-
-        sorted_gems = sorted(final_gems, key=lambda x: x['potential_x'], reverse=True)
-        message = f"💎 **تقرير الجواهر المخفية ({client.name})** 💎\n\n"
-        for gem in sorted_gems[:5]:
-            message += (f"**${gem['symbol'].replace('USDT', '')}**\n"
-                        f"  - 🚀 **العودة للقمة: {gem['potential_x']:.1f}X**\n"
-                        f"  - 🩸 مصححة بنسبة: {gem['correction_percent']:.1f}%\n\n")
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Error in run_gem_hunter_scan: {e}", exc_info=True)
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="حدث خطأ فادح أثناء البحث عن الجواهر.")
-
-async def show_strategy_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """[NEW] يعرض تقرير أداء الاستراتيجيات"""
-    sent_message = await update.message.reply_text("📊 جارِ تحليل أداء الاستراتيجيات...")
+    tasks = [scan_exchange_for_gems(ex_id, ex) for ex_id, ex in bot_state["exchanges"].items()]
+    results = await asyncio.gather(*tasks)
     
-    records = get_strategy_stats()
-    if not records:
-        await sent_message.edit_text("لا توجد بيانات كافية لعرض الإحصائيات. سيتم تجميع البيانات مع مرور الوقت.")
+    for i, ex_id in enumerate(bot_state["exchanges"].keys()):
+        if results[i]:
+            all_platform_gems[ex_id] = results[i]
+
+    if not all_platform_gems:
+        await update.message.reply_text("✅ **بحث الجواهر الشامل اكتمل:** لم يتم العثور على عملات تتوافق مع الشروط على أي منصة.")
         return
 
-    stats = {}
-    for strategy, status, peak_profit in records:
-        if strategy not in stats:
-            stats[strategy] = {'total': 0, 'success': 0, 'failure': 0, 'profits': []}
-        stats[strategy]['total'] += 1
-        stats[strategy]['profits'].append(peak_profit or 0)
-        if status == 'Success':
-            stats[strategy]['success'] += 1
-        elif status == 'Failure':
-            stats[strategy]['failure'] += 1
+    message = "💎 **تقرير الجواهر المخفية الشامل** 💎\n\n"
+    for ex_id, gems in all_platform_gems.items():
+        message += f"--- **منصة {ex_id}** ---\n"
+        for gem in gems:
+            message += (f"**${gem['symbol'].replace('/USDT', '')}**\n"
+                        f"  - 🚀 **العودة للقمة:** {gem['potential_x']:.1f}X\n"
+                        f"  - 🩸 مصححة بنسبة: {gem['correction_percent']:.1f}%\n")
+        message += "\n"
 
-    message = "📊 **تقرير أداء الاستراتيجيات (آخر 30 يومًا)** 📊\n\n"
-    for strategy, data in stats.items():
-        # تحديد النجاح: للقناص هو وصول الهدف، ولغيره هو تحقيق ربح
-        if strategy == 'Sniper':
-            success_rate = (data['success'] / data['total']) * 100 if data['total'] > 0 else 0
-        else:
-            successful_trades = sum(1 for p in data['profits'] if p > 2.0) # اعتبر النجاح > 2% ربح
-            success_rate = (successful_trades / len(data['profits'])) * 100 if data['profits'] else 0
+    await update.message.reply_text(message, parse_mode="Markdown")
 
-        avg_profit = np.mean(data['profits']) if data['profits'] else 0
-
-        message += f"--- **{strategy}** ---\n"
-        message += f"- **إجمالي التنبيهات:** {data['total']}\n"
-        message += f"- **نسبة النجاح:** {success_rate:.1f}%\n"
-        message += f"- **متوسط أقصى ربح:** {avg_profit:.2f}%\n\n"
+async def run_top_movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str):
+    ex_id = "Binance"
+    exchange = bot_state["exchanges"].get(ex_id)
     
-    await sent_message.edit_text(message)
-
-# =============================================================================
-# --- 5. المهام الآلية الدورية (تم التحديث) ---
-# =============================================================================
-def add_to_monitoring(symbol, alert_price, peak_volume, alert_time, source, exchange_name):
-    if symbol not in performance_tracker[exchange_name]:
-        performance_tracker[exchange_name][symbol] = {'alert_price': alert_price, 'alert_time': alert_time, 'source': source, 'current_price': alert_price, 'high_price': alert_price, 'status': 'Tracking', 'momentum_lost_alerted': False}
-        logger.info(f"PERFORMANCE TRACKING STARTED for {symbol} on {exchange_name}")
-
-async def fomo_hunter_loop(client: BaseExchangeClient, bot: Bot, bot_data: dict):
-    logger.info(f"Fomo Hunter (v31) background task started for {client.name}.")
-    while True:
-        await asyncio.sleep(RUN_FOMO_SCAN_EVERY_MINUTES * 60)
-        if not bot_data.get('background_tasks_enabled', True): continue
-        logger.info(f"===== Fomo Hunter ({client.name}): Starting Advanced Scan =====")
-        try:
-            momentum_coins = await helper_get_advanced_momentum(client)
-            if not momentum_coins: continue
-                
-            now, new_alerts = datetime.now(UTC), []
-            for coin in momentum_coins:
-                symbol = coin['symbol']
-                last_alert = recently_alerted_fomo[client.name].get(symbol)
-                if not last_alert or (now - last_alert) > timedelta(hours=1):
-                     new_alerts.append(coin)
-                     recently_alerted_fomo[client.name][symbol] = now
-                     
-            if not new_alerts: continue
-            
-            message = f"🚨 **تنبيه تلقائي من صياد الزخم ({client.name})** 🚨\n\n"
-            for i, coin in enumerate(new_alerts[:3]):
-                message += (f"**{i+1}. ${coin['symbol'].replace('USDT', '')}**\n"
-                            f"    - **نقاط الزخم:** `{coin['score']}` ⭐\n"
-                            f"    - السعر: `${format_price(coin['current_price'])}`\n\n")
-            await broadcast_message(bot, message)
-
-            for coin in new_alerts[:3]:
-                add_to_monitoring(coin['symbol'], float(coin['current_price']), 0, now, "Fomo Hunter", client.name)
-        except Exception as e:
-            logger.error(f"Error in fomo_hunter_loop for {client.name}: {e}", exc_info=True)
-
-async def new_listings_sniper_loop(client: BaseExchangeClient, bot: Bot, bot_data: dict):
-    logger.info(f"New Listings Sniper background task started for {client.name}.")
-    initial_data = await client.get_market_data()
-    if initial_data:
-        known_symbols[client.name] = {s['symbol'] for s in initial_data}
-        logger.info(f"Sniper for {client.name}: Initialized with {len(known_symbols[client.name])} symbols.")
-    while True:
-        await asyncio.sleep(RUN_LISTING_SCAN_EVERY_SECONDS)
-        if not bot_data.get('background_tasks_enabled', True): continue
-        try:
-            data = await client.get_market_data()
-            if not data: continue
-            current_symbols = {s['symbol'] for s in data}
-            if not known_symbols[client.name]:
-                known_symbols[client.name] = current_symbols; continue
-            
-            if newly_listed := current_symbols - known_symbols[client.name]:
-                for symbol in newly_listed:
-                    logger.info(f"Sniper ({client.name}): NEW LISTING DETECTED: {symbol}")
-                    await broadcast_message(bot, f"🎯 **إدراج جديد على {client.name}:** `${symbol}`")
-                known_symbols[client.name].update(newly_listed)
-        except Exception as e:
-            logger.error(f"An unexpected error in new_listings_sniper_loop for {client.name}: {e}")
-
-async def performance_tracker_loop(session: aiohttp.ClientSession, bot: Bot):
-    logger.info("Performance Tracker background task started.")
-    while True:
-        await asyncio.sleep(RUN_PERFORMANCE_TRACKER_EVERY_MINUTES * 60)
-        now = datetime.now(UTC)
-        client_cache = {}
-
-        # [UPDATED] Loop for performance_tracker (Momentum, etc.)
-        for platform in PLATFORMS:
-            for symbol, data in list(performance_tracker[platform].items()):
-                if data.get('status') == 'Archived': continue
-                
-                try:
-                    if platform not in client_cache: client_cache[platform] = get_exchange_client(platform, session)
-                    client = client_cache[platform]
-                    if not client: continue
-
-                    if now - data['alert_time'] > timedelta(hours=PERFORMANCE_TRACKING_DURATION_HOURS):
-                        # Log to DB before archiving
-                        alert_price = data['alert_price']
-                        peak_profit = ((data['high_price'] - alert_price) / alert_price) * 100 if alert_price > 0 else 0
-                        final_profit = ((data['current_price'] - alert_price) / alert_price) * 100 if alert_price > 0 else 0
-                        log_strategy_result(symbol, platform, data['source'], alert_price, 'Expired', peak_profit, final_profit)
-                        data['status'] = 'Archived'
-                        del performance_tracker[platform][symbol]
-                        continue
-
-                    current_price = await client.get_current_price(symbol)
-                    if not current_price: continue
-
-                    data['current_price'] = current_price
-                    if current_price > data.get('high_price', 0): data['high_price'] = current_price
-                    
-                    if not data.get('momentum_lost_alerted', False) and data['high_price'] > 0:
-                        price_drop = ((current_price - data['high_price']) / data['high_price']) * 100
-                        if price_drop <= MOMENTUM_LOSS_THRESHOLD_PERCENT:
-                            message = (f"⚠️ **تنبيه: فقدان الزخم لـ ${symbol.replace('USDT','')}** ({platform})\n"
-                                       f"    - هبط بنسبة `{price_drop:.2f}%` من أعلى قمة.")
-                            await broadcast_message(bot, message)
-                            data['momentum_lost_alerted'] = True
-                            logger.info(f"MOMENTUM LOSS ALERT sent for {symbol} on {platform}")
-                except Exception as e:
-                    logger.error(f"Error updating price for {symbol} on {platform}: {e}")
-
-        # [UPDATED] Loop for sniper_tracker
-        for platform in PLATFORMS:
-            for symbol, data in list(sniper_tracker[platform].items()):
-                if data['status'] != 'Tracking': continue
-                try:
-                    if platform not in client_cache: client_cache[platform] = get_exchange_client(platform, session)
-                    client = client_cache[platform]
-                    if not client: continue
-
-                    if now - data['alert_time'] > timedelta(hours=PERFORMANCE_TRACKING_DURATION_HOURS):
-                        log_strategy_result(symbol, platform, 'Sniper', data['alert_price'], 'Expired', data.get('peak_profit',0), data.get('final_profit',0))
-                        del sniper_tracker[platform][symbol]
-                        continue
-                    
-                    current_price = await client.get_current_price(symbol)
-                    if not current_price: continue
-                    
-                    alert_price = data['alert_price']
-                    data['peak_profit'] = max(data.get('peak_profit',0), ((current_price - alert_price)/alert_price)*100)
-                    data['final_profit'] = ((current_price - alert_price)/alert_price)*100
-
-                    if current_price >= data['target_price']:
-                        await broadcast_message(bot, f"✅ **القناص: نجاح!** ✅\n\n**العملة:** `${symbol}` ({platform})\n**النتيجة:** وصلت للهدف بنجاح.")
-                        logger.info(f"SNIPER TRACKER ({platform}): {symbol} SUCCEEDED.")
-                        log_strategy_result(symbol, platform, 'Sniper', alert_price, 'Success', data['peak_profit'], data['final_profit'])
-                        del sniper_tracker[platform][symbol]
-                    elif current_price <= data['invalidation_price']:
-                        await broadcast_message(bot, f"❌ **القناص: فشل.** ❌\n\n**العملة:** `${symbol}` ({platform})\n**النتيجة:** فشل الاختراق وعاد السعر تحت نقطة الإبطال.")
-                        logger.info(f"SNIPER TRACKER ({platform}): {symbol} FAILED.")
-                        log_strategy_result(symbol, platform, 'Sniper', alert_price, 'Failure', data['peak_profit'], data['final_profit'])
-                        del sniper_tracker[platform][symbol]
-
-                except Exception as e:
-                     logger.error(f"Error in Sniper Tracker for {symbol} on {platform}: {e}")
-
-async def coiled_spring_radar_loop(client: BaseExchangeClient, bot_data: dict):
-    logger.info(f"Sniper Radar (v31) background task started for {client.name}.")
-    while True:
-        await asyncio.sleep(SNIPER_RADAR_RUN_EVERY_MINUTES * 60)
-        if not bot_data.get('background_tasks_enabled', True): continue
-        logger.info(f"===== Sniper Radar ({client.name}): Searching for coiled springs =====")
-        try:
-            market_data = await client.get_market_data()
-            if not market_data: continue
-            
-            candidates = [p for p in market_data if float(p.get('quoteVolume', '0')) > SNIPER_MIN_USDT_VOLUME and not is_excluded_symbol(p['symbol'])]
-
-            async def check_candidate(symbol):
-                klines = await client.get_processed_klines(symbol, '15m', int(SNIPER_COMPRESSION_PERIOD_HOURS * 4))
-                if not klines or len(klines) < int(SNIPER_COMPRESSION_PERIOD_HOURS * 4): return
-                highs, lows, vols = [float(k[2]) for k in klines], [float(k[3]) for k in klines], [float(k[5]) for k in klines]
-                highest, lowest = np.max(highs), np.min(lows)
-                if lowest == 0: return
-                
-                if ((highest - lowest) / lowest) * 100 <= SNIPER_MAX_VOLATILITY_PERCENT:
-                    if poc := calculate_poc(klines):
-                        if symbol not in sniper_watchlist[client.name]:
-                            sniper_watchlist[client.name][symbol] = {'high': highest, 'low': lowest, 'poc': poc}
-                            logger.info(f"SNIPER RADAR ({client.name}): Added {symbol} to watchlist.")
-
-            await asyncio.gather(*[check_candidate(p['symbol']) for p in candidates])
-        except Exception as e:
-            logger.error(f"Error in coiled_spring_radar_loop for {client.name}: {e}", exc_info=True)
-
-async def breakout_trigger_loop(client: BaseExchangeClient, bot: Bot, bot_data: dict):
-    logger.info(f"Sniper Trigger (v31) background task started for {client.name}.")
-    while True:
-        await asyncio.sleep(SNIPER_TRIGGER_RUN_EVERY_SECONDS)
-        if not bot_data.get('background_tasks_enabled', True) or not sniper_watchlist[client.name]: continue
-
-        for symbol, data in list(sniper_watchlist[client.name].items()):
-            try:
-                if (data['high'] - data['low']) / data['high'] * 100 < SNIPER_MIN_TARGET_PERCENT:
-                    del sniper_watchlist[client.name][symbol]; continue
-                
-                trend_klines = await client.get_processed_klines(symbol, SNIPER_TREND_TIMEFRAME, SNIPER_TREND_PERIOD + 5)
-                if not trend_klines or len(trend_klines) < SNIPER_TREND_PERIOD: continue
-                trend_sma = calculate_sma([float(k[4]) for k in trend_klines], SNIPER_TREND_PERIOD)
-                if trend_sma is None or float(trend_klines[-1][4]) < trend_sma: continue 
-
-                klines = await client.get_processed_klines(symbol, '5m', 25)
-                if not klines or len(klines) < 20: continue
-                confirmation_candle, trigger_candle = klines[-2], klines[-3]
-                breakout_level = data['high']
-                
-                if float(trigger_candle[2]) < breakout_level or float(confirmation_candle[4]) < breakout_level: continue
-                if float(trigger_candle[5]) < np.mean([float(k[5]) for k in klines[-22:-2]]) * SNIPER_BREAKOUT_VOLUME_MULTIPLIER: continue
-                
-                order_book = await client.get_order_book(symbol, WHALE_OBI_LEVELS)
-                if not order_book or order_book_imbalance(order_book.get('bids',[]), order_book.get('asks',[])) < SNIPER_OBI_THRESHOLD: continue
-                
-                vwap_klines = await client.get_processed_klines(symbol, '15m', 20)
-                if not vwap_klines: continue
-                vwap_15m = calculate_vwap([float(k[4]) for k in vwap_klines], [float(k[5]) for k in vwap_klines], 14)
-                if vwap_15m and float(confirmation_candle[4]) < vwap_15m: continue
-
-                # --- All Filters Passed: Generate Signal ---
-                alert_price, range_height = float(confirmation_candle[4]), data['high'] - data['low']
-                target_price = data['high'] + range_height
-                atr_klines = await client.get_processed_klines(symbol, '15m', 15)
-                atr_val = calculate_atr([float(k[2]) for k in atr_klines], [float(k[3]) for k in atr_klines], [float(k[4]) for k in atr_klines])
-                stop_loss = alert_price - (atr_val * SNIPER_ATR_STOP_MULTIPLIER) if atr_val else data['low']
-
-                message = (f"🎯 **قناص: اختراق عالي الجودة!** 🎯\n\n"
-                           f"**العملة:** `${symbol}` ({client.name})\n"
-                           f"**النمط:** اختراق مؤكد بالاتجاه، الحجم، وتدفق الأوامر.\n"
-                           f"**سعر التأكيد:** `{format_price(alert_price)}`\n\n"
-                           f"📝 **خطة المراقبة:**\n- **وقف الخسارة:** `{format_price(stop_loss)}`\n- **الهدف:** `{format_price(target_price)}`")
-                await broadcast_message(bot, message)
-                
-                sniper_tracker[client.name][symbol] = {'alert_time': datetime.now(UTC), 'alert_price': alert_price, 'target_price': target_price, 'invalidation_price': stop_loss, 'status': 'Tracking'}
-                # [NEW] Add to re-test watchlist
-                sniper_retest_watchlist[client.name][symbol] = {'breakout_level': breakout_level, 'timestamp': datetime.now(UTC)}
-                
-                del sniper_watchlist[client.name][symbol]
-            except Exception as e:
-                 logger.error(f"Error in breakout_trigger_loop for {symbol}: {e}", exc_info=True)
-                 if symbol in sniper_watchlist[client.name]: del sniper_watchlist[client.name][symbol]
-
-async def retest_hunter_loop(client: BaseExchangeClient, bot: Bot, bot_data: dict):
-    """[NEW] مهمة خلفية لصيد فرص إعادة الاختبار"""
-    logger.info(f"Sniper Retest Hunter (v31) background task started for {client.name}.")
-    while True:
-        await asyncio.sleep(SNIPER_RETEST_RUN_EVERY_MINUTES * 60)
-        if not bot_data.get('background_tasks_enabled', True) or not sniper_retest_watchlist[client.name]: continue
-
-        for symbol, data in list(sniper_retest_watchlist[client.name].items()):
-            try:
-                if datetime.now(UTC) - data['timestamp'] > timedelta(hours=SNIPER_RETEST_TIMEOUT_HOURS):
-                    del sniper_retest_watchlist[client.name][symbol]; continue
-                
-                klines = await client.get_processed_klines(symbol, '5m', 20)
-                if not klines or len(klines) < 10: continue
-
-                last_candle, prev_candles = klines[-1], klines[-10:-1]
-                low_price, close_price, open_price = float(last_candle[3]), float(last_candle[4]), float(last_candle[1])
-                breakout_level = data['breakout_level']
-
-                # هل السعر قريب من منطقة الاختبار؟
-                if breakout_level * (1 - SNIPER_RETEST_PROXIMITY_PERCENT/100) <= low_price <= breakout_level * (1 + SNIPER_RETEST_PROXIMITY_PERCENT/100):
-                    # هل هناك علامات ارتداد؟
-                    is_bullish_candle = close_price > open_price
-                    avg_volume = np.mean([float(k[5]) for k in prev_candles])
-                    is_high_volume = float(last_candle[5]) > avg_volume * 1.5
-
-                    if is_bullish_candle and is_high_volume:
-                        message = (f"🎯 **قناص (تأكيد): فرصة إعادة اختبار!** 🎯\n\n"
-                                   f"**العملة:** `${symbol}` ({client.name})\n"
-                                   f"**النمط:** ارتداد ناجح من منطقة الاختراق عند `{format_price(breakout_level)}`.\n"
-                                   f"**السعر الحالي:** `{format_price(close_price)}`\n\n"
-                                   f"*(قد تكون هذه إشارة دخول ثانية أكثر أمانًا)*")
-                        await broadcast_message(bot, message)
-                        logger.info(f"SNIPER RETEST ({client.name}): Confirmed re-test for {symbol}!")
-                        del sniper_retest_watchlist[client.name][symbol] # إزالة بعد إرسال التنبيه
-            except Exception as e:
-                logger.error(f"Error in retest_hunter_loop for {symbol}: {e}")
-                if symbol in sniper_retest_watchlist[client.name]: del sniper_retest_watchlist[client.name][symbol]
-
-async def divergence_detector_loop(bot: Bot, bot_data: dict, session: aiohttp.ClientSession):
-    """[NEW] مهمة خلفية لكشف الانفراج"""
-    logger.info("Divergence Detector (v31) background task started.")
-    # استخدام عميل Binance كمرجع للسوق العام
-    client = get_exchange_client('binance', session)
-    if not client:
-        logger.error("Divergence detector failed to start: Binance client not available.")
-        return
-
-    while True:
-        await asyncio.sleep(RUN_DIVERGENCE_SCAN_EVERY_HOURS * 3600)
-        if not bot_data.get('background_tasks_enabled', True): continue
-        logger.info("===== Divergence Detector: Starting Market Scan =====")
-        try:
-            market_data = await client.get_market_data()
-            if not market_data: continue
-            
-            top_coins_by_vol = sorted([c for c in market_data if c['symbol'].endswith('USDT')], key=lambda x: float(x.get('quoteVolume', '0')), reverse=True)[:50]
-            
-            for coin in top_coins_by_vol:
-                symbol = coin['symbol']
-                try:
-                    klines = await client.get_processed_klines(symbol, DIVERGENCE_TIMEFRAME, DIVERGENCE_KLINE_LIMIT)
-                    divergence = find_rsi_divergence(klines)
-
-                    if divergence:
-                        alert_key = f"{symbol}_{divergence['type']}"
-                        last_alert_time = recently_alerted_divergence.get(alert_key)
-                        
-                        # إرسال تنبيه لنفس الانفراج مرة كل 12 ساعة كحد أقصى
-                        if not last_alert_time or (datetime.now(UTC) - last_alert_time) > timedelta(hours=12):
-                            if divergence['type'] == 'Bearish':
-                                message = (f"⚠️ **رصد انفراج سلبي على ${symbol}** ({client.name})\n\n"
-                                           f"إطار: `{DIVERGENCE_TIMEFRAME}`. قد يسبق هذا حركة تصحيحية هابطة.")
-                            else: # Bullish
-                                message = (f"✅ **رصد انفراج إيجابي على ${symbol}** ({client.name})\n\n"
-                                           f"إطار: `{DIVERGENCE_TIMEFRAME}`. قد يسبق هذا حركة صاعدة.")
-                            
-                            await broadcast_message(bot, message)
-                            recently_alerted_divergence[alert_key] = datetime.now(UTC)
-                            logger.info(f"DIVERGENCE ALERT: {divergence['type']} on {symbol}")
-                except Exception as e:
-                    logger.warning(f"Could not check divergence for {symbol}: {e}")
-        except Exception as e:
-            logger.error(f"Major error in divergence_detector_loop: {e}", exc_info=True)
-
-# =============================================================================
-# --- 6. تشغيل البوت (تم التحديث) ---
-# =============================================================================
-async def send_startup_message(bot: Bot):
+    modes = {
+        "gainers": {"title": "الأعلى ربحاً", "key": "change", "reverse": True, "icon": "📈"},
+        "losers": {"title": "الأعلى خسارة", "key": "change", "reverse": False, "icon": "📉"},
+        "volume": {"title": "الأعلى تداولاً", "key": "quoteVolume", "reverse": True, "icon": "💰"}
+    }
+    config = modes[mode]
+    
+    await update.message.reply_text(f"{config['icon']} **{config['title']} ({exchange.id})**\n\n🔍 جارِ جلب البيانات...")
+    
     try:
-        await broadcast_message(bot, "✅ **بوت الصياد الذكي (v31.0 - استراتيجيات متقدمة) متصل الآن!**\n\nأرسل /start لعرض القائمة.")
-        logger.info("Startup message sent successfully to all users.")
+        tickers = await exchange.fetch_tickers()
+        valid_tickers = [t for t in tickers.values() if t['symbol'].endswith('/USDT') and t.get('quoteVolume', 0) > 100000]
+        
+        sorted_tickers = sorted(valid_tickers, key=lambda x: x.get(config['key'], 0) or 0, reverse=config['reverse'])[:10]
+        
+        message = f"{config['icon']} **{config['title']} على {exchange.id}** {config['icon']}\n\n"
+        for i, coin in enumerate(sorted_tickers):
+            symbol_name = coin['symbol'].replace('/USDT', '')
+            if mode in ["gainers", "losers"]:
+                stat = f"`%{coin.get('change', 0):+.2f}`"
+            else:
+                volume = coin.get('quoteVolume', 0)
+                stat = f"`${volume/1_000_000:.2f}M`"
+            message += f"**{i+1}. ${symbol_name}:** {stat}\n"
+        
+        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        logger.error(f"Failed to send startup message: {e}")
+        logger.error(f"Error in top movers ({mode}): {e}")
+        await update.message.reply_text("حدث خطأ أثناء جلب البيانات.")
+
+async def calculate_pro_score(exchange: ccxt.Exchange, symbol: str) -> Optional[Dict]:
+    """[NEW] Calculates a technical score for a given symbol."""
+    score = 0
+    analysis = {'symbol': symbol}
+    try:
+        ohlcv = await safe_fetch_ohlcv(exchange, symbol, '15m', 100)
+        if not ohlcv or len(ohlcv) < 50: return None
+
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        current_price = df['close'].iloc[-1]
+
+        # 1. Trend
+        ema20 = ta.ema(df['close'], length=20).iloc[-1]
+        ema50 = ta.ema(df['close'], length=50).iloc[-1]
+        if current_price > ema20 > ema50: score += 2; analysis['Trend'] = "Strong Up"
+        elif current_price > ema20: score += 1; analysis['Trend'] = "Up"
+        else: analysis['Trend'] = "Sideways/Down"
+        
+        # 2. Momentum (RSI)
+        rsi = ta.rsi(df['close'], length=14).iloc[-1]
+        analysis['RSI'] = f"{rsi:.1f}"
+        if 30 < rsi < 65: score += 1
+        if rsi >= 65: score += 2
+        
+        # 3. Volume
+        avg_vol = df['volume'][-20:-1].mean()
+        last_vol = df['volume'].iloc[-1]
+        if last_vol > avg_vol * 1.5: score += 1
+        if last_vol > avg_vol * 2.5: score += 1
+        analysis['Vol Ratio'] = f"{last_vol/avg_vol:.1f}x" if avg_vol > 0 else "N/A"
+        
+        analysis['Score'] = score
+        analysis['Price'] = format_price(current_price)
+        return analysis
+    except Exception:
+        return None
+
+async def run_pro_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """[NEW] Performs a professional scan with a scoring system."""
+    ex_id = "Binance"
+    exchange = bot_state["exchanges"].get(ex_id)
+    await update.message.reply_text(f"🎯 **الفحص الاحترافي**\n\n🔍 جارِ تحليل وتصنيف العملات على {ex_id}...")
+
+    try:
+        tickers = await exchange.fetch_tickers()
+        candidates = [s for s, t in tickers.items() if s.endswith('/USDT') and t.get('quoteVolume', 0) > 500000]
+
+        tasks = [calculate_pro_score(exchange, symbol) for symbol in candidates[:150]] # Scan top 150 by volume
+        results = await asyncio.gather(*tasks)
+        
+        min_score = bot_state["settings"]["pro_scan_min_score"]
+        strong_opportunities = [res for res in results if res and res.get('Score', 0) >= min_score]
+
+        if not strong_opportunities:
+            await update.message.reply_text("✅ **الفحص الاحترافي اكتمل:** لم يتم العثور على فرص قوية حالياً.")
+            return
+
+        sorted_ops = sorted(strong_opportunities, key=lambda x: x['Score'], reverse=True)
+        message = f"🎯 **أفضل الفرص حسب النقاط ({ex_id})** 🎯\n\n"
+        for coin in sorted_ops[:10]:
+            message += (f"**${coin['symbol'].replace('/USDT', '')}**\n"
+                        f"    - **النقاط:** `{coin['Score']}` ⭐\n"
+                        f"    - **السعر:** `${coin.get('Price', 'N/A')}`\n"
+                        f"    - **الاتجاه:** `{coin.get('Trend', 'N/A')}` | **RSI:** `{coin.get('RSI', 'N/A')}`\n\n")
+        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Error in Pro Scan: {e}", exc_info=True)
+        await update.message.reply_text("حدث خطأ فادح أثناء الفحص الاحترافي.")
+
+# =============================================================================
+# --- 🤖 10. أوامر التليجرام وواجهة المستخدم 🤖 ---
+# =============================================================================
+
+def build_main_menu() -> ReplyKeyboardMarkup:
+    """Builds the main menu with a dynamic tasks toggle button."""
+    tasks_enabled = bot_state["settings"].get("background_tasks_enabled", True)
+    toggle_button_text = "إيقاف المهام 🔴" if tasks_enabled else "تفعيل المهام 🟢"
+    
+    keyboard = [
+        ["🔬 تحليل فني", "⚡️ تحليل سريع"],
+        ["🎯 فحص احترافي", "💎 صائد الجواهر"],
+        ["📈 الأعلى ربحاً", "📉 الأعلى خسارة", "💰 الأعلى تداولاً"],
+        ["📊 تقرير الأداء", "📈 الصفقات النشطة"],
+        [toggle_button_text],
+        ["⚙️ الإعدادات", "🔬 فحص يدوي الآن"],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+settings_menu_keyboard = [
+    ["🎭 تفعيل/تعطيل الماسحات", "🏁 أنماط جاهزة"],
+    ["🔙 القائمة الرئيسية"]
+]
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر البدء."""
+    welcome_message = (
+        "أهلاً بك في **بوت الصياد الهجين v1.3**!\n\n"
+        "تمت ترقية 'صائد الجواهر' ليعمل على كل المنصات وإعادة 'الفحص الاحترافي'."
+    )
+    await update.message.reply_text(welcome_message, reply_markup=build_main_menu(), parse_mode=ParseMode.MARKDOWN)
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة الرسائل النصية من القائمة الرئيسية."""
+    text = update.message.text
+    
+    if context.user_data.get('awaiting_symbol_for_ta'):
+        context.user_data['awaiting_symbol_for_ta'] = False
+        context.args = [text.strip()]
+        await run_full_technical_analysis(update, context)
+        return
+    if context.user_data.get('awaiting_symbol_for_scalp'):
+        context.user_data['awaiting_symbol_for_scalp'] = False
+        context.args = [text.strip()]
+        await run_scalp_analysis(update, context)
+        return
+
+    handlers = {
+        "إيقاف المهام 🔴": toggle_tasks_command,
+        "تفعيل المهام 🟢": toggle_tasks_command,
+        "📊 تقرير الأداء": performance_report_command,
+        "📈 الصفقات النشطة": active_trades_command,
+        "⚙️ الإعدادات": lambda u, c: u.message.reply_text("اختر من قائمة الإعدادات:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True)),
+        "🔬 فحص يدوي الآن": lambda u, c: c.job_queue.run_once(lambda ctx: perform_scan_and_trade(ctx), 0, name='manual_scan') and u.message.reply_text("⏳ جاري بدء فحص يدوي..."),
+        "🎭 تفعيل/تعطيل الماسحات": scanners_menu_command,
+        "🏁 أنماط جاهزة": presets_menu_command,
+        "🔙 القائمة الرئيسية": start_command,
+        "🔬 تحليل فني": lambda u, c: setattr(c.user_data, 'awaiting_symbol_for_ta', True) or u.message.reply_text("🔬 يرجى إرسال رمز العملة للتحليل المعمق (مثال: `BTC`)"),
+        "⚡️ تحليل سريع": lambda u, c: setattr(c.user_data, 'awaiting_symbol_for_scalp', True) or u.message.reply_text("⚡️ يرجى إرسال رمز العملة للتحليل السريع (مثال: `PEPE`)"),
+        "💎 صائد الجواهر": run_gem_hunter_scan,
+        "🎯 فحص احترافي": run_pro_scan,
+        "📈 الأعلى ربحاً": lambda u, c: run_top_movers_command(u, c, "gainers"),
+        "📉 الأعلى خسارة": lambda u, c: run_top_movers_command(u, c, "losers"),
+        "💰 الأعلى تداولاً": lambda u, c: run_top_movers_command(u, c, "volume"),
+    }
+    
+    if text in handlers:
+        await handlers[text](update, context)
+
+async def toggle_tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggles the background tasks on or off."""
+    current_status = bot_state["settings"].get("background_tasks_enabled", True)
+    new_status = not current_status
+    bot_state["settings"]["background_tasks_enabled"] = new_status
+    save_settings()
+    
+    status_text = "تفعيل" if new_status else "إيقاف"
+    await update.message.reply_text(
+        f"✅ تم **{status_text}** المهام الخلفية بنجاح.",
+        reply_markup=build_main_menu()
+    )
+    logger.info(f"Background tasks toggled {'ON' if new_status else 'OFF'} by user.")
+
+async def performance_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إنشاء وإرسال تقرير أداء شامل."""
+    try:
+        conn = sqlite3.connect(DATABASE_FILE)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        total_trades = cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'Closed'").fetchone()[0]
+        successful_trades = cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'Closed' and pnl_usdt > 0").fetchone()[0]
+        total_pnl = cursor.execute("SELECT SUM(pnl_usdt) FROM trades WHERE status = 'Closed'").fetchone()[0] or 0
+        win_rate = (successful_trades / total_trades * 100) if total_trades > 0 else 0
+        
+        report = [
+            f"📊 **تقرير الأداء الشامل** 📊\n",
+            f"▪️ إجمالي الصفقات المغلقة: *{total_trades}*",
+            f"▪️ نسبة النجاح: *{win_rate:.2f}%*",
+            f"▪️ صافي الربح/الخسارة: *${total_pnl:,.2f}*\n",
+            "--- **أداء الاستراتيجيات** ---"
+        ]
+
+        strategy_stats = cursor.execute("SELECT strategy, COUNT(*), AVG(pnl_percent), SUM(pnl_usdt) FROM trades WHERE status = 'Closed' GROUP BY strategy").fetchall()
+        conn.close()
+
+        for stat in strategy_stats:
+            report.append(f"\n- `{stat['strategy']}`:")
+            report.append(f"  - عدد الصفقات: {stat['COUNT(*)']}")
+            report.append(f"  - متوسط الربح/الخسارة: {stat['AVG(pnl_percent)']:.2f}%")
+            report.append(f"  - صافي الربح/الخسارة: ${stat['SUM(pnl_usdt)']:.2f}")
+
+        await update.message.reply_text("\n".join(report), parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        await update.message.reply_text(f"حدث خطأ أثناء إنشاء التقرير: {e}")
+        logger.error(f"Error in performance_report_command: {e}")
+
+async def active_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+     await update.message.reply_text("قيد التطوير: سيتم هنا عرض الصفقات النشطة.")
+
+async def scanners_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    active_scanners = bot_state["settings"].get("active_scanners", [])
+    keyboard = [
+        [InlineKeyboardButton(f"{'✅' if name in active_scanners else '❌'} {name}", callback_data=f"toggle_scanner_{name}")]
+        for name in ACTIVE_SCANNERS.keys()
+    ]
+    await update.message.reply_text("اختر الماسحات لتفعيلها أو تعطيلها:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def presets_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    active_preset = bot_state["settings"].get("active_preset_name", "N/A")
+    keyboard = [
+        [InlineKeyboardButton(f"{'▶️' if name == active_preset else ''} {name}", callback_data=f"set_preset_{name}")]
+        for name in PRESETS.keys()
+    ]
+    await update.message.reply_text("اختر نمط الإعدادات الجاهز:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة ضغطات الأزرار (Inline Keyboard)."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data.startswith("toggle_scanner_"):
+        scanner_name = data.replace("toggle_scanner_", "")
+        active = bot_state["settings"]["active_scanners"]
+        if scanner_name in active: active.remove(scanner_name)
+        else: active.append(scanner_name)
+        save_settings()
+        
+        active_scanners = bot_state["settings"].get("active_scanners", [])
+        keyboard = [
+            [InlineKeyboardButton(f"{'✅' if name in active_scanners else '❌'} {name}", callback_data=f"toggle_scanner_{name}")]
+            for name in ACTIVE_SCANNERS.keys()
+        ]
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    elif data.startswith("set_preset_"):
+        preset_name = data.replace("set_preset_", "")
+        if preset_name in PRESETS:
+            bot_state["settings"]["active_preset_name"] = preset_name
+            bot_state["settings"]["filters"] = PRESETS[preset_name]
+            save_settings()
+            load_settings()
+            await query.edit_message_text(f"✅ تم تفعيل النمط: **{preset_name}**", parse_mode=ParseMode.MARKDOWN)
+        else:
+             await query.edit_message_text("❌ نمط غير معروف.")
+
+# =============================================================================
+# --- 🚀 11. نقطة انطلاق البوت 🚀 ---
+# =============================================================================
 
 async def post_init(application: Application):
-    logger.info("Bot initialized. Starting background tasks...")
-    session = aiohttp.ClientSession()
-    application.bot_data["session"] = session
-    bot, bot_data = application.bot, application.bot_data
+    """يتم تنفيذها بعد تهيئة البوت وقبل بدء التشغيل."""
+    logger.info("Bot post-init sequence started...")
+    load_settings()
+    setup_database()
+    await initialize_exchanges()
+    
+    if not bot_state["exchanges"]:
+        logger.critical("CRITICAL: No exchanges could be initialized. Bot cannot run.")
+        return
 
-    # بدء المهام الخلفية
-    application.bot_data['task_performance'] = asyncio.create_task(performance_tracker_loop(session, bot))
-    application.bot_data['task_divergence'] = asyncio.create_task(divergence_detector_loop(bot, bot_data, session)) # [NEW]
+    job_queue = application.job_queue
+    job_queue.run_repeating(perform_scan_and_trade, interval=timedelta(minutes=SCAN_INTERVAL_MINUTES), first=10, name='main_scan')
+    job_queue.run_repeating(track_active_trades, interval=timedelta(minutes=TRACK_INTERVAL_MINUTES), first=20, name='trade_tracker')
+    
+    await application.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text="✅ **بوت الصياد الهجين v1.3 متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
+    logger.info("Bot is fully initialized and background jobs are scheduled.")
 
-    for platform_name in PLATFORMS:
-        if client := get_exchange_client(platform_name.lower(), session):
-            application.bot_data[f'task_fomo_{platform_name}'] = asyncio.create_task(fomo_hunter_loop(client, bot, bot_data))
-            application.bot_data[f'task_listings_{platform_name}'] = asyncio.create_task(new_listings_sniper_loop(client, bot, bot_data))
-            application.bot_data[f'task_sniper_radar_{platform_name}'] = asyncio.create_task(coiled_spring_radar_loop(client, bot_data))
-            application.bot_data[f'task_sniper_trigger_{platform_name}'] = asyncio.create_task(breakout_trigger_loop(client, bot, bot_data))
-            application.bot_data[f'task_sniper_retest_{platform_name}'] = asyncio.create_task(retest_hunter_loop(client, bot, bot_data)) # [NEW]
-
-    await send_startup_message(bot)
+async def post_shutdown(application: Application):
+    """يتم تنفيذها عند إيقاف البوت لإغلاق الاتصالات."""
+    logger.info("Closing all exchange connections...")
+    for ex in bot_state["exchanges"].values():
+        await ex.close()
+    logger.info("Shutdown complete.")
 
 def main() -> None:
-    if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN:
-        logger.critical("FATAL ERROR: Bot token is not set.")
+    """الوظيفة الرئيسية لتشغيل البوت."""
+    if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN or 'YOUR_CHAT' in TELEGRAM_ADMIN_CHAT_ID:
+        logger.critical("FATAL ERROR: Bot token or Admin Chat ID is not set in environment variables.")
         return
-    setup_database()
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    application.bot_data['background_tasks_enabled'] = True
+        
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
+
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("ta", run_full_technical_analysis))
+    application.add_handler(CommandHandler("scalp", run_scalp_analysis))
+    
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-    application.post_init = post_init
-    logger.info("Telegram bot is starting...")
+    application.add_handler(CallbackQueryHandler(button_callback_handler))
+
+    logger.info("Starting Hybrid Hunter Bot v1.3...")
     application.run_polling()
 
 if __name__ == '__main__':
     main()
+
