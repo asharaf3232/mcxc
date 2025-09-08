@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 # ======================================================================================================================
-# == Hybrid Hunter Bot v1.5 | بوت الصياد الهجين ========================================================================
+# == Hybrid Hunter Bot v1.6 | بوت الصياد الهجين ========================================================================
 # ======================================================================================================================
 #
-# v1.5 Changelog:
-# - FIX: Corrected the environment variable name for the chat ID from `TELEGRAM_ADMIN_CHAT_ID` to `TELEGRAM_CHAT_ID`
-#   to match standard deployment configurations and resolve the startup error.
+# v1.6 Changelog:
+# - FIX: Corrected Gate.io exchange ID from "Gate.io" to "Gateio" to resolve CCXT connection error.
+# - NOTE: The JobQueue installation issue is resolved in the updated `requirements.txt` file.
 #
 # ======================================================================================================================
 
@@ -47,7 +47,6 @@ from telegram.ext import (
 #    في سيرفر الاستضافة الخاص بك. الطريقة الثانية هي الأكثر أمانًا.
 # =======================================================================================
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
-# [FIXED] Changed variable name to match user's environment variable
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID')
 # =======================================================================================
 
@@ -67,7 +66,8 @@ logging.getLogger('telegram').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # --- إعدادات البوت العامة ---
-PLATFORMS = ["Binance", "MEXC", "Gate.io", "Bybit", "KuCoin", "OKX"]
+# [FIXED] Corrected "Gate.io" to "Gateio"
+PLATFORMS = ["Binance", "MEXC", "Gateio", "Bybit", "KuCoin", "OKX"]
 SCAN_INTERVAL_MINUTES = 15
 TRACK_INTERVAL_MINUTES = 2
 PERFORMANCE_TRACKING_DURATION_HOURS = 48
@@ -1091,6 +1091,10 @@ async def post_init(application: Application):
         return
 
     job_queue = application.job_queue
+    if not job_queue:
+        logger.warning("JobQueue is not available. Automated scans will not run.")
+        return
+        
     job_queue.run_repeating(perform_scan_and_trade, interval=timedelta(minutes=SCAN_INTERVAL_MINUTES), first=10, name='main_scan')
     job_queue.run_repeating(track_active_trades, interval=timedelta(minutes=TRACK_INTERVAL_MINUTES), first=20, name='trade_tracker')
     
