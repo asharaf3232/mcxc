@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 # ======================================================================================================================
-# == Hybrid Hunter Bot v1.3 | بوت الصياد الهجين ========================================================================
+# == Hybrid Hunter Bot v1.4 | بوت الصياد الهجين ========================================================================
 # ======================================================================================================================
 #
-# v1.3 Changelog:
-# - UPGRADED: Gem Hunter is now multi-platform. It scans all connected exchanges and reports top gems for each.
-# - RE-ADDED: Pro Scan feature is back. It provides a technical score for coins based on multiple indicators.
-# - UI UPDATE: Added "Pro Scan" button to the main menu for on-demand professional scanning.
-# - LOGIC REFINEMENT: Gem hunter now uses a more robust method for checking the listing date, making it exchange-agnostic.
+# v1.4 Changelog:
+# - CONFIGURATION: Added a clear, dedicated section at the top for users to input their Bot Token and Chat ID.
+# - CLARITY: Improved comments to make the configuration process more straightforward.
 #
 # ======================================================================================================================
 
@@ -42,8 +40,16 @@ from telegram.ext import (
 # =============================================================================
 
 # --- إعدادات التليجرام والملفات ---
+# =======================================================================================
+# == !! هام جداً: أدخل بياناتك هنا !! ====================================================
+# =======================================================================================
+# 1. استبدل 'YOUR_TELEGRAM_BOT_TOKEN' بالتوكن الخاص بالبوت الذي أنشأته من BotFather.
+# 2. استبدل 'YOUR_CHAT_ID' بمعرف الدردشة الخاص بك (يمكنك الحصول عليه من بوتات مثل @userinfobot).
+# =======================================================================================
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
 TELEGRAM_ADMIN_CHAT_ID = os.environ.get('TELEGRAM_ADMIN_CHAT_ID', 'YOUR_CHAT_ID')
+# =======================================================================================
+
 DATABASE_FILE = "hybrid_hunter.db"
 SETTINGS_FILE = "hybrid_settings.json"
 LOG_FILE = "hybrid_hunter.log"
@@ -745,14 +751,18 @@ async def run_gem_hunter_scan(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not tickers: return []
 
             platform_gems = []
+            
+            # Create a list of symbols to process
+            symbols_to_check = []
             for symbol, ticker in tickers.items():
-                if not symbol.endswith('/USDT') or not ticker.get('quoteVolume') or ticker['quoteVolume'] < settings["gem_min_24h_volume_usdt"]:
-                    continue
+                if symbol.endswith('/USDT') and ticker.get('quoteVolume') and ticker['quoteVolume'] > settings["gem_min_24h_volume_usdt"]:
+                    symbols_to_check.append(symbol)
 
-                ohlcv = await safe_fetch_ohlcv(exchange, symbol, '1d', 1000) # Fetch more data for history
+            for symbol in symbols_to_check:
+                await asyncio.sleep(exchange.rateLimit / 1000)
+                ohlcv = await safe_fetch_ohlcv(exchange, symbol, '1d', 1000)
                 if not ohlcv or len(ohlcv) < 30: continue
                 
-                # Robust listing date check
                 first_candle_time = datetime.fromtimestamp(ohlcv[0][0] / 1000, timezone.utc)
                 if first_candle_time < listing_since: continue
 
@@ -767,7 +777,7 @@ async def run_gem_hunter_scan(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if correction <= settings["gem_min_correction_percent"] and rise_from_atl >= settings["gem_min_rise_from_atl_percent"]:
                     platform_gems.append({'symbol': symbol, 'potential_x': ath / current, 'correction_percent': correction})
             
-            return sorted(platform_gems, key=lambda x: x['potential_x'], reverse=True)[:10] # Return top 10
+            return sorted(platform_gems, key=lambda x: x['potential_x'], reverse=True)[:10]
         except Exception as e:
             logger.error(f"Error scanning gems on {ex_id}: {e}")
             return []
@@ -839,25 +849,24 @@ async def calculate_pro_score(exchange: ccxt.Exchange, symbol: str) -> Optional[
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         current_price = df['close'].iloc[-1]
 
-        # 1. Trend
         ema20 = ta.ema(df['close'], length=20).iloc[-1]
         ema50 = ta.ema(df['close'], length=50).iloc[-1]
         if current_price > ema20 > ema50: score += 2; analysis['Trend'] = "Strong Up"
         elif current_price > ema20: score += 1; analysis['Trend'] = "Up"
         else: analysis['Trend'] = "Sideways/Down"
         
-        # 2. Momentum (RSI)
         rsi = ta.rsi(df['close'], length=14).iloc[-1]
         analysis['RSI'] = f"{rsi:.1f}"
         if 30 < rsi < 65: score += 1
         if rsi >= 65: score += 2
         
-        # 3. Volume
         avg_vol = df['volume'][-20:-1].mean()
         last_vol = df['volume'].iloc[-1]
-        if last_vol > avg_vol * 1.5: score += 1
-        if last_vol > avg_vol * 2.5: score += 1
-        analysis['Vol Ratio'] = f"{last_vol/avg_vol:.1f}x" if avg_vol > 0 else "N/A"
+        if avg_vol > 0:
+            vol_ratio = last_vol / avg_vol
+            if vol_ratio > 1.5: score += 1
+            if vol_ratio > 2.5: score += 1
+            analysis['Vol Ratio'] = f"{vol_ratio:.1f}x"
         
         analysis['Score'] = score
         analysis['Price'] = format_price(current_price)
@@ -875,7 +884,7 @@ async def run_pro_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tickers = await exchange.fetch_tickers()
         candidates = [s for s, t in tickers.items() if s.endswith('/USDT') and t.get('quoteVolume', 0) > 500000]
 
-        tasks = [calculate_pro_score(exchange, symbol) for symbol in candidates[:150]] # Scan top 150 by volume
+        tasks = [calculate_pro_score(exchange, symbol) for symbol in candidates[:150]]
         results = await asyncio.gather(*tasks)
         
         min_score = bot_state["settings"]["pro_scan_min_score"]
