@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 # ======================================================================================================================
-# == Hybrid Hunter Bot v2.2 | The Professional Version ===============================================================
+# == Hybrid Hunter Bot v2.3 | The Professional Version ===============================================================
 # ======================================================================================================================
 #
-# v2.2 "إصلاحات الموثوقية" Changelog:
-# - CRITICAL FIX (Top Movers): تم إصلاح الخلل الذي كان يسبب ظهور نسب تغيير فلكية وغير منطقية (مثل 900% لـ BTC). يقوم البوت الآن بحساب نسبة التغيير الحقيقية لآخر 24 ساعة يدويًا لضمان دقة قوائم الأعلى ربحًا وخسارة.
-# - CRITICAL FIX (Active Trades): تم حل مشكلة "حدث خطأ" عند وجود عدد كبير من الصفقات النشطة. يقوم البوت الآن بتقسيم التقرير الطويل إلى عدة صفحات (رسائل) تلقائيًا لضمان وصول التقرير كاملاً دائمًا.
-# - STABILITY: تحسينات عامة في الأداء.
+# v2.3 "تحسينات واجهة المستخدم والأداء" Changelog:
+# - NEW FEATURE (Task Locking): تم إضافة نظام قفل يمنع تشغيل أي أمر جديد (مثل الفحوصات اليدوية) إذا كان هناك أمر آخر قيد التنفيذ، مع إظهار رسالة انتظار للمستخدم.
+# - IMPROVEMENT (Gem Hunter): تم تسريع "صائد الجواهر" بشكل كبير، حيث أصبح الآن يبحث في المنصة المحددة يدويًا فقط بدلاً من جميع المنصات.
+# - IMPROVEMENT (UI): تم دمج أزرار "الأعلى ربحاً"، "الأعلى خسارة"، و"الأعلى تداولاً" في زر واحد جديد "📊 ملخص السوق" لتقديم تقرير شامل وواجهة أنظف.
+# - STABILITY: زيادة حد الصفقات المتزامنة الافتراضي.
 #
 # ======================================================================================================================
 
@@ -20,6 +21,7 @@ import time
 import math
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional
+from functools import wraps
 
 import ccxt.async_support as ccxt
 import numpy as np
@@ -90,7 +92,7 @@ DEFAULT_SETTINGS = {
     "active_manual_exchange": "Binance",
     "active_preset_name": "BALANCED",
     "active_scanners": ["sniper_pro", "momentum_breakout", "whale_radar"],
-    "max_concurrent_trades": 50, # Increased limit
+    "max_concurrent_trades": 75, # Increased limit
     "virtual_trade_size_usdt": 100.0,
     "use_master_trend_filter": True,
     "master_trend_tf": "4h",
@@ -115,9 +117,27 @@ bot_state = {
     "exchanges": {},
     "settings": {},
     "scan_in_progress": False,
+    "user_task_in_progress": False, # NEW: for task locking
     "recently_alerted": {},
 }
 api_semaphore = asyncio.Semaphore(10)
+
+# =============================================================================
+# ---  Decorator for Task Locking ---
+# =============================================================================
+def user_task_lock(func):
+    """Decorator to prevent concurrent execution of user-initiated long tasks."""
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if bot_state.get('user_task_in_progress', False):
+            await update.message.reply_text("⏳ يوجد أمر آخر قيد التنفيذ حالياً. يرجى الانتظار حتى يكتمل.")
+            return
+        try:
+            bot_state['user_task_in_progress'] = True
+            return await func(update, context, *args, **kwargs)
+        finally:
+            bot_state['user_task_in_progress'] = False
+    return wrapper
 
 # =============================================================================
 # --- 🗄️ 2. إدارة الإعدادات وقاعدة البيانات 🗄️ ---
@@ -631,6 +651,7 @@ async def update_trade_peak_price(trade_id: int, highest_price: float):
 # =============================================================================
 # --- 🔍 8. وظائف التحليل عند الطلب 🔍 ---
 # =============================================================================
+@user_task_lock
 async def run_full_technical_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     try:
@@ -695,6 +716,7 @@ async def run_full_technical_analysis(update: Update, context: ContextTypes.DEFA
         logger.error(f"Error in full TA for {symbol}: {e}", exc_info=True)
         await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ أثناء تحليل {symbol}. تأكد من صحة الرمز.")
 
+@user_task_lock
 async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """[IMPROVED] Provides a more detailed scalp analysis."""
     chat_id = update.message.chat_id
@@ -775,27 +797,26 @@ async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"Error in scalp analysis for {symbol}: {e}")
         await context.bot.edit_message_text(chat_id=chat_id, message_id=sent_message.message_id, text=f"حدث خطأ أثناء تحليل {symbol}.")
 
-
+@user_task_lock
 async def run_gem_hunter_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """[UPGRADED] Scans all connected exchanges for potential gems."""
-    await update.message.reply_text("💎 **صائد الجواهر الشامل**\n\n🔍 جارِ تنفيذ مسح عميق على جميع المنصات...")
+    """[IMPROVEMENT] Scans only the active manual exchange for potential gems."""
+    ex_id = context.user_data.get('active_manual_exchange', 'Binance')
+    exchange = bot_state["exchanges"].get(ex_id)
+    if not exchange:
+        await update.message.reply_text(f"المنصة المحددة '{ex_id}' غير متصلة.")
+        return
+
+    await update.message.reply_text(f"💎 **صائد الجواهر**\n\n🔍 جارِ تنفيذ مسح عميق على منصة **{ex_id}**...")
     
     settings = bot_state["settings"]
     listing_since = datetime.now(timezone.utc) - timedelta(days=settings["gem_listing_since_days"])
     
-    all_platform_gems = {}
-
     async def scan_exchange_for_gems(ex_id, exchange):
         try:
             tickers = await exchange.fetch_tickers()
             if not tickers: return []
-
             platform_gems = []
-            
-            symbols_to_check = []
-            for symbol, ticker in tickers.items():
-                if symbol.endswith('/USDT') and not is_symbol_unwanted(symbol) and ticker.get('quoteVolume') and ticker['quoteVolume'] > settings["gem_min_24h_volume_usdt"]:
-                    symbols_to_check.append(symbol)
+            symbols_to_check = [s for s, t in tickers.items() if s.endswith('/USDT') and not is_symbol_unwanted(s) and t.get('quoteVolume') and t['quoteVolume'] > settings["gem_min_24h_volume_usdt"]]
 
             for symbol in symbols_to_check:
                 await asyncio.sleep(exchange.rateLimit / 1000)
@@ -815,7 +836,7 @@ async def run_gem_hunter_scan(update: Update, context: ContextTypes.DEFAULT_TYPE
                 
                 if correction <= settings["gem_min_correction_percent"] and rise_from_atl >= settings["gem_min_rise_from_atl_percent"]:
                     potential_x = ath / current
-                    if potential_x < 1_000_000: # Filter out absurd values
+                    if potential_x < 1_000_000:
                         platform_gems.append({'symbol': symbol, 'potential_x': potential_x, 'correction_percent': correction})
             
             return sorted(platform_gems, key=lambda x: x['potential_x'], reverse=True)[:10]
@@ -823,80 +844,82 @@ async def run_gem_hunter_scan(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.error(f"Error scanning gems on {ex_id}: {e}")
             return []
 
-    tasks = [scan_exchange_for_gems(ex_id, ex) for ex_id, ex in bot_state["exchanges"].items()]
-    results = await asyncio.gather(*tasks)
-    
-    for i, ex_id in enumerate(bot_state["exchanges"].keys()):
-        if results[i]:
-            all_platform_gems[ex_id] = results[i]
+    gems = await scan_exchange_for_gems(ex_id, exchange)
 
-    if not all_platform_gems:
-        await update.message.reply_text("✅ **بحث الجواهر الشامل اكتمل:** لم يتم العثور على عملات تتوافق مع الشروط على أي منصة.")
+    if not gems:
+        await update.message.reply_text(f"✅ **بحث الجواهر اكتمل:** لم يتم العثور على عملات تتوافق مع الشروط على منصة {ex_id}.")
         return
 
-    message = "💎 **تقرير الجواهر المخفية الشامل** 💎\n\n"
-    for ex_id, gems in all_platform_gems.items():
-        message += f"--- **منصة {ex_id}** ---\n"
-        for gem in gems:
-            message += (f"**${gem['symbol'].replace('/USDT', '')}**\n"
-                        f"  - 🚀 **العودة للقمة:** {gem['potential_x']:.1f}X\n"
-                        f"  - 🩸 مصححة بنسبة: {gem['correction_percent']:.1f}%\n")
-        message += "\n"
-
+    message = f"💎 **تقرير الجواهر المخفية ({ex_id})** 💎\n\n"
+    for gem in gems:
+        message += (f"**${gem['symbol'].replace('/USDT', '')}**\n"
+                    f"  - 🚀 **العودة للقمة:** {gem['potential_x']:.1f}X\n"
+                    f"  - 🩸 مصححة بنسبة: {gem['correction_percent']:.1f}%\n")
     await update.message.reply_text(message, parse_mode="Markdown")
 
-async def run_top_movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str):
-    """[CRITICAL FIX] Calculates 24h change manually to avoid API data bugs."""
+async def get_top_movers_data(exchange: ccxt.Exchange, mode: str) -> List[str]:
+    """Helper function to fetch and format top movers data."""
+    modes = {
+        "gainers": {"key": "change", "reverse": True},
+        "losers": {"key": "change", "reverse": False},
+        "volume": {"key": "quoteVolume", "reverse": True}
+    }
+    config = modes[mode]
+    
+    try:
+        tickers = await exchange.fetch_tickers()
+        valid_tickers = []
+        for symbol, t in tickers.items():
+            if t['symbol'].endswith('/USDT') and not is_symbol_unwanted(t['symbol']) and t.get('quoteVolume', 0) > 100000:
+                if mode != 'volume':
+                    open_price, last_price = t.get('open'), t.get('last')
+                    if open_price and last_price and open_price > 0:
+                        t['change'] = ((last_price - open_price) / open_price) * 100
+                    else:
+                        t['change'] = 0
+                valid_tickers.append(t)
+        
+        sorted_tickers = sorted(valid_tickers, key=lambda x: x.get(config['key'], 0) or 0, reverse=config['reverse'])[:5] # Top 5 for summary
+        
+        report_lines = []
+        for i, coin in enumerate(sorted_tickers):
+            symbol_name = coin['symbol'].replace('/USDT', '')
+            if mode != 'volume':
+                stat = f"`%{coin.get('change', 0):+.2f}`"
+            else:
+                volume = coin.get('quoteVolume', 0)
+                stat = f"`${volume/1_000_000:.2f}M`"
+            report_lines.append(f"**{i+1}. ${symbol_name}:** {stat}")
+        return report_lines
+    except Exception as e:
+        logger.error(f"Error in get_top_movers_data ({mode}): {e}")
+        return ["حدث خطأ أثناء جلب البيانات."]
+
+@user_task_lock
+async def run_market_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """[NEW] Fetches gainers, losers, and volume in one consolidated report."""
     ex_id = context.user_data.get('active_manual_exchange', 'Binance')
     exchange = bot_state["exchanges"].get(ex_id)
     if not exchange:
         await update.message.reply_text(f"المنصة المحددة '{ex_id}' غير متصلة.")
         return
+        
+    await update.message.reply_text(f"📊 جارِ إعداد ملخص السوق لمنصة {ex_id}...")
     
-    modes = {
-        "gainers": {"title": "الأعلى ربحاً", "key": "change", "reverse": True, "icon": "📈"},
-        "losers": {"title": "الأعلى خسارة", "key": "change", "reverse": False, "icon": "📉"},
-        "volume": {"title": "الأعلى تداولاً", "key": "quoteVolume", "reverse": True, "icon": "💰"}
-    }
-    config = modes[mode]
-    
-    await update.message.reply_text(f"{config['icon']} **{config['title']} ({exchange.id})**\n\n🔍 جارِ جلب البيانات وحساب النسب الصحيحة...")
-    
-    try:
-        tickers = await exchange.fetch_tickers()
-        
-        valid_tickers = []
-        for symbol, t in tickers.items():
-            if t['symbol'].endswith('/USDT') and not is_symbol_unwanted(t['symbol']) and t.get('quoteVolume', 0) > 100000:
-                # Manual calculation of 24h change
-                if mode != 'volume':
-                    open_price = t.get('open')
-                    last_price = t.get('last')
-                    if open_price and last_price and open_price > 0:
-                        change = ((last_price - open_price) / open_price) * 100
-                        t['change'] = change # Overwrite potentially buggy API value
-                    else:
-                        t['change'] = 0 # Cannot calculate, default to 0
-                valid_tickers.append(t)
-        
-        sorted_tickers = sorted(valid_tickers, key=lambda x: x.get(config['key'], 0) or 0, reverse=config['reverse'])[:10]
-        
-        message = f"{config['icon']} **{config['title']} على {exchange.id}** {config['icon']}\n\n"
-        for i, coin in enumerate(sorted_tickers):
-            symbol_name = coin['symbol'].replace('/USDT', '')
-            if mode in ["gainers", "losers"]:
-                stat = f"`%{coin.get('change', 0):+.2f}`"
-            else:
-                volume = coin.get('quoteVolume', 0)
-                stat = f"`${volume/1_000_000:.2f}M`"
-            message += f"**{i+1}. ${symbol_name}:** {stat}\n"
-        
-        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Error in top movers ({mode}): {e}")
-        await update.message.reply_text("حدث خطأ أثناء جلب البيانات.")
+    gainers_task = get_top_movers_data(exchange, 'gainers')
+    losers_task = get_top_movers_data(exchange, 'losers')
+    volume_task = get_top_movers_data(exchange, 'volume')
 
+    gainers, losers, volume = await asyncio.gather(gainers_task, losers_task, volume_task)
+    
+    message = f"📊 **ملخص السوق لمنصة {ex_id}** 📊\n\n"
+    message += "--- **📈 الأعلى ربحاً** ---\n" + "\n".join(gainers) + "\n\n"
+    message += "--- **📉 الأعلى خسارة** ---\n" + "\n".join(losers) + "\n\n"
+    message += "--- **💰 الأعلى تداولاً** ---\n" + "\n".join(volume)
 
+    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
+@user_task_lock
 async def calculate_pro_score(exchange: ccxt.Exchange, symbol: str) -> Optional[Dict]:
     """Calculates a technical score for a given symbol."""
     score = 0
@@ -933,6 +956,7 @@ async def calculate_pro_score(exchange: ccxt.Exchange, symbol: str) -> Optional[
     except Exception:
         return None
 
+@user_task_lock
 async def run_pro_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Performs a professional scan with a scoring system."""
     ex_id = context.user_data.get('active_manual_exchange', 'Binance')
@@ -981,7 +1005,7 @@ def build_main_menu() -> ReplyKeyboardMarkup:
     keyboard = [
         ["🔬 تحليل فني", "⚡️ تحليل سريع"],
         ["🎯 فحص احترافي", "💎 صائد الجواهر"],
-        ["📈 الأعلى ربحاً", "📉 الأعلى خسارة", "💰 الأعلى تداولاً"],
+        ["📊 ملخص السوق"],
         ["📊 تقرير الأداء", "📈 الصفقات النشطة"],
         [toggle_button_text],
         ["⚙️ الإعدادات", "🔬 فحوصات يدوية"],
@@ -997,8 +1021,8 @@ settings_menu_keyboard = [
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر البدء."""
     welcome_message = (
-        "أهلاً بك في **بوت الصياد الهجين v2.2 (إصدار الموثوقية)**!\n\n"
-        "تم تطبيق إصلاحات وتحسينات بناءً على ملاحظاتك."
+        "أهلاً بك في **بوت الصياد الهجين v2.3 (إصدار تحسينات الأداء)**!\n\n"
+        "تم تطبيق تطويرات جديدة بناءً على طلباتك."
     )
     context.user_data.setdefault('active_manual_exchange', 'Binance')
     context.user_data.setdefault('next_step', None)
@@ -1011,6 +1035,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_data = context.user_data
     next_step = user_data.get('next_step')
 
+    # Handle stateful inputs first
     if next_step == 'get_ta_symbol':
         user_data['next_step'] = None
         context.args = [text.strip()]
@@ -1041,9 +1066,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("⚡️ يرجى إرسال رمز العملة للتحليل السريع (مثال: `PEPE`)")
     elif text == "💎 صائد الجواهر": await run_gem_hunter_scan(update, context)
     elif text == "🎯 فحص احترافي": await run_pro_scan(update, context)
-    elif text == "📈 الأعلى ربحاً": await run_top_movers_command(update, context, "gainers")
-    elif text == "📉 الأعلى خسارة": await run_top_movers_command(update, context, "losers")
-    elif text == "💰 الأعلى تداولاً": await run_top_movers_command(update, context, "volume")
+    elif text == "📊 ملخص السوق": await run_market_summary_command(update, context)
     # Manual Scan Handlers
     elif text == "فحص القناص الآن": await run_manual_scanner(update, context, "sniper_pro")
     elif text == "فحص الزخم الآن": await run_manual_scanner(update, context, "momentum_breakout")
@@ -1099,6 +1122,7 @@ async def performance_report_command(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(f"حدث خطأ أثناء إنشاء التقرير: {e}")
         logger.error(f"Error in performance_report_command: {e}")
 
+@user_task_lock
 async def active_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """[PAGINATION FIX] Fetches and displays all active trades, paginated."""
     await update.message.reply_text("📈 **الصفقات النشطة**\n\n🔍 جارِ جلب الصفقات الحالية...")
@@ -1195,8 +1219,9 @@ async def manual_scans_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
 
+@user_task_lock
 async def run_manual_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE, scanner_name: str):
-    """[FIXED] Wrapper to run a specific scanner on demand."""
+    """Wrapper to run a specific scanner on demand."""
     ex_id = context.user_data.get('active_manual_exchange', 'Binance')
     exchange = bot_state["exchanges"].get(ex_id)
     if not exchange:
@@ -1322,7 +1347,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(perform_scan_and_trade, interval=timedelta(minutes=SCAN_INTERVAL_MINUTES), first=10, name='main_scan')
     job_queue.run_repeating(track_active_trades, interval=timedelta(minutes=TRACK_INTERVAL_MINUTES), first=20, name='trade_tracker')
     
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v2.2 متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v2.3 متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
     logger.info("Bot is fully initialized and background jobs are scheduled.")
 
 async def post_shutdown(application: Application):
@@ -1358,9 +1383,8 @@ def main() -> None:
 
     application.add_error_handler(error_handler)
 
-    logger.info("Starting Hybrid Hunter Bot v2.2...")
+    logger.info("Starting Hybrid Hunter Bot v2.3...")
     application.run_polling()
 
 if __name__ == '__main__':
     main()
-
