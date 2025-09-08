@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 # ======================================================================================================================
-# == Hybrid Hunter Bot v3.1 | The All-Seeing Version =================================================================
+# == Hybrid Hunter Bot v3.1 | The All-Seeing Version (Fixed) =========================================================
 # ======================================================================================================================
 #
-# v3.1 "مراقب الإدراجات" Changelog:
-# - NEW (New Listings Monitor): ميزة جديدة وقوية! يقوم البوت الآن بمراقبة جميع المنصات تلقائياً بحثاً عن أي عملات
-#   جديدة يتم إدراجها (أزواج /USDT)، ويرسل تنبيهاً فورياً عند اكتشافها.
-# - NEW (Manual Listings Check): تمت إضافة زر "📢 مراقبة الإدراجات" لواجهة المستخدم لبدء فحص يدوي فوري عن
-#   الإدراجات الجديدة في أي وقت.
-# - DB-ENHANCEMENT: تمت إضافة جدول جديد إلى قاعدة البيانات لتخزين العملات المعروفة وتتبع الإدراجات الجديدة بفعالية.
-# - STABILITY: تحسينات في آلية إعادة تحميل قوائم الأسواق لضمان الحصول على أحدث البيانات دائماً.
+# v3.1 "إصلاح معالج الأوامر" Changelog:
+# - CRITICAL FIX (Conversation Handler): تم إصلاح الخلل الذي كان يمنع زر "الإعدادات المتقدمة" من الاستجابة.
+#   تمت إعادة هيكلة أولويات معالجات الأوامر لضمان بدء المحادثات بشكل صحيح.
+# - RETAINED (Detailed Alerts): تم الإبقاء على رسائل إغلاق الصفقات المفصلة والشاملة.
+# - RETAINED (New Listings Monitor): ميزة مراقبة الإدراجات الجديدة تعمل بكامل طاقتها.
 #
 # ======================================================================================================================
 
@@ -70,7 +68,7 @@ logger = logging.getLogger(__name__)
 PLATFORMS = ["Binance", "MEXC", "Gateio", "Bybit", "KuCoin", "OKX"]
 SCAN_INTERVAL_MINUTES = 15
 TRACK_INTERVAL_MINUTES = 2
-LISTINGS_CHECK_INTERVAL_MINUTES = 30 # NEW: For new listings check
+LISTINGS_CHECK_INTERVAL_MINUTES = 30
 SUMMARY_INTERVAL_HOURS = 6
 UNWANTED_SYMBOL_SUBSTRINGS = ['UP/', 'DOWN/', '3L/', '5L/', '3S/', '5S/', 'BEAR/', 'BULL/', '/USDC', '/FDUSD', '/DAI']
 TELEGRAM_MAX_MSG_LENGTH = 4096
@@ -228,7 +226,7 @@ def setup_database():
                 UNIQUE(exchange, symbol, timeframe, timestamp)
             )
         """)
-        # NEW: Table for tracking known symbols for new listings
+        # Table for tracking known symbols for new listings
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS known_symbols (
                 exchange TEXT NOT NULL,
@@ -741,13 +739,13 @@ async def track_active_trades(context: ContextTypes.DEFAULT_TYPE):
                  await update_trade_peak_price(trade['id'], highest_price)
 
 async def close_trade(bot, trade: Dict, exit_price: float, reason: str):
-    """إغلاق الصفقة وتحديث قاعدة البيانات وإرسال إشعار."""
+    """إغلاق الصفقة وتحديث قاعدة البيانات وإرسال إشعار شامل."""
     pnl_usdt = (exit_price - trade['entry_price']) / trade['entry_price'] * trade['trade_value_usdt']
     pnl_percent = pnl_usdt / trade['trade_value_usdt'] * 100
 
-    # --- تعديل: حساب مدة الصفقة ---
     duration_str = "N/A"
     try:
+        # Use timezone-aware datetime objects for calculation
         entry_time = datetime.strptime(trade['timestamp'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
         close_time = datetime.now(timezone.utc)
         duration = close_time - entry_time
@@ -773,7 +771,6 @@ async def close_trade(bot, trade: Dict, exit_price: float, reason: str):
         conn.commit()
         conn.close()
 
-        # --- تعديل: تنسيق الرسالة لتكون أكثر شمولاً ---
         icon = "✅" if pnl_usdt >= 0 else "❌"
         reason_icon = "🎯" if "Take Profit" in reason else "🛑"
         message = (
@@ -1518,10 +1515,17 @@ async def advanced_settings_start(update: Update, context: ContextTypes.DEFAULT_
         keyboard.append([InlineKeyboardButton(f"{val['name']}: {current_value}", callback_data=f"edit_{key}")])
     keyboard.append([InlineKeyboardButton("🔙 إنهاء وإغلاق", callback_data="exit_settings")])
 
-    await update.message.reply_text(
-        "⚙️ **الإعدادات المتقدمة** ⚙️\n\nاختر الإعداد الذي تريد تعديله:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    # Check if the message is from a query or a new message
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            "⚙️ **الإعدادات المتقدمة** ⚙️\n\nاختر الإعداد الذي تريد تعديله:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await update.message.reply_text(
+            "⚙️ **الإعدادات المتقدمة** ⚙️\n\nاختر الإعداد الذي تريد تعديله:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     return CHOOSING_SETTING
 
 async def choose_setting_to_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1572,7 +1576,7 @@ async def end_settings_conversation(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     if query:
         await query.answer()
-        await query.edit_message_text("تم إغلاق قائمة الإعدادات.", reply_markup=None)
+        await query.edit_message_text("تم إغلاق قائمة الإعدادات.")
     else:
         await update.message.reply_text("تم إلغاء العملية.", reply_markup=build_main_menu())
 
@@ -1671,7 +1675,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(send_periodic_summary, interval=timedelta(hours=SUMMARY_INTERVAL_HOURS), first=60, name='periodic_summary')
     job_queue.run_repeating(periodic_listings_check, interval=timedelta(minutes=LISTINGS_CHECK_INTERVAL_MINUTES), first=45, name='new_listings_checker')
 
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v3.1 متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v3.1 (نسخة مصححة) متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
     logger.info("Bot is fully initialized and background jobs are scheduled.")
 
 async def post_shutdown(application: Application):
@@ -1695,6 +1699,7 @@ def main() -> None:
         .build()
     )
 
+    # Conversation handler for advanced settings
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^⚙️ الإعدادات المتقدمة$'), advanced_settings_start)],
         states={
@@ -1704,25 +1709,34 @@ def main() -> None:
         },
         fallbacks=[CommandHandler('cancel', end_settings_conversation),
                    CallbackQueryHandler(end_settings_conversation, pattern='^exit_settings$')],
+        # per_message=False ensures that if the user clicks the button multiple times, it doesn't create multiple conversations
+        per_message=False 
     )
 
-    application.add_handler(conv_handler)
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("ta", run_full_technical_analysis))
-    application.add_handler(CommandHandler("scalp", run_scalp_analysis))
+    # Add handlers with correct priority. Handlers with lower group number are processed first.
+    # Group 0: Conversation Handler (highest priority for text messages)
+    application.add_handler(conv_handler, group=0)
 
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-    application.add_handler(CallbackQueryHandler(button_callback_handler))
+    # Group 1: Command Handlers
+    application.add_handler(CommandHandler("start", start_command), group=1)
+    application.add_handler(CommandHandler("ta", run_full_technical_analysis), group=1)
+    application.add_handler(CommandHandler("scalp", run_scalp_analysis), group=1)
 
+    # Group 2: Regular Text Message Handlers (for buttons)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message), group=2)
+    
+    # Group 3: Callback Query Handlers (for inline buttons)
+    application.add_handler(CallbackQueryHandler(button_callback_handler), group=3)
+
+    # Error handler
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("Exception while handling an update:", exc_info=context.error)
 
     application.add_error_handler(error_handler)
 
-    logger.info("Starting Hybrid Hunter Bot v3.1...")
+    logger.info("Starting Hybrid Hunter Bot v3.1 (Fixed)...")
     application.run_polling()
 
 if __name__ == '__main__':
     main()
-
 
