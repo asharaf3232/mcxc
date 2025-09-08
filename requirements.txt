@@ -3,4 +3,4 @@ aiohttp==3.9.5
 numpy==1.26.4
 ccxt==4.3.52
 pandas==2.2.2
-pandas-ta==0.3.14b0
+pandas-ta
