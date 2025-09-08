@@ -47,7 +47,7 @@ from telegram.ext import (
 # 2. استبدل 'YOUR_CHAT_ID' بمعرف الدردشة الخاص بك (يمكنك الحصول عليه من بوتات مثل @userinfobot).
 # =======================================================================================
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
-TELEGRAM_ADMIN_CHAT_ID = os.environ.get('TELEGRAM_ADMIN_CHAT_ID', 'YOUR_CHAT_ID')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_ADMIN_CHAT_ID', 'YOUR_CHAT_ID')
 # =======================================================================================
 
 DATABASE_FILE = "hybrid_hunter.db"
