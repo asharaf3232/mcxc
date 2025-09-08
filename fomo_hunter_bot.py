@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 # ======================================================================================================================
-# == Hybrid Hunter Bot v1.7 | The Polished Version ===================================================================
+# == Hybrid Hunter Bot v1.8 | The Stable & Polished Version ==========================================================
 # ======================================================================================================================
 #
-# v1.7 "المتقن" Changelog:
-# - CRITICAL FIX: Resolved the `KeyError` in the momentum scanner that was halting the entire automated scan cycle.
-# - CRITICAL FIX: Fixed the `AttributeError` for on-demand analysis buttons (TA/Scalp) by refactoring the state management.
-# - FEATURE: Implemented a powerful universal symbol filter to exclude leveraged tokens (3L/5S) and other unwanted pairs from all scans.
-# - FEATURE: Re-introduced a dedicated menu for selecting the active exchange for all manual reports (Top Movers, Pro Scan, etc.).
-# - FEATURE: Replaced the ambiguous "Manual Scan" button with a clear "Manual Scans" submenu for targeted on-demand scanning.
-# - IMPROVEMENT: Gem Hunter results are now cleaner, excluding junk data and applying the universal filter.
-# - UI: All menus have been updated to reflect the new, more intuitive structure.
+# v1.8 "النهائي المستقر" Changelog:
+# - CRITICAL FIX: Resolved the `KeyError` in the momentum scanner, fully enabling the automated scan cycle.
+# - CRITICAL FIX: Fixed the `AttributeError` and logic flow for on-demand analysis buttons (TA/Scalp). They now work correctly.
+# - FEATURE: Fully implemented the "Manual Scans" submenu. Buttons for Sniper, Momentum, and Whale scans are now functional.
+# - FEATURE: The "Select Manual Exchange" feature is now fully integrated with all manual reports and scans.
+# - IMPROVEMENT: Gem Hunter and all Top Movers reports now use the universal symbol filter to provide clean, reliable data.
+# - IMPROVEMENT: Refactored the main message handler for better stability and clarity.
 #
 # ======================================================================================================================
 
@@ -68,7 +67,7 @@ PLATFORMS = ["Binance", "MEXC", "Gateio", "Bybit", "KuCoin", "OKX"]
 SCAN_INTERVAL_MINUTES = 15
 TRACK_INTERVAL_MINUTES = 2
 PERFORMANCE_TRACKING_DURATION_HOURS = 48
-UNWANTED_SYMBOL_SUBSTRINGS = ['UP/', 'DOWN/', '3L/', '3S/', 'BEAR/', 'BULL/', '/USDC', '/FDUSD', '/DAI']
+UNWANTED_SYMBOL_SUBSTRINGS = ['UP/', 'DOWN/', '3L/', '5L/', '3S/', '5S/', 'BEAR/', 'BULL/', '/USDC', '/FDUSD', '/DAI']
 
 
 # --- الأنماط الجاهزة (Presets) ---
@@ -285,7 +284,7 @@ async def pre_scan_filter(exchange: ccxt.Exchange) -> List[Dict]:
         if (symbol.endswith('/USDT') and 
             not is_symbol_unwanted(symbol) and
             ticker.get('quoteVolume') and ticker['quoteVolume'] > filters_cfg['min_quote_volume_24h_usd'] and
-            ticker.get('bid') and ticker.get('ask')):
+            ticker.get('bid') and ticker.get('ask') and ticker.get('ask') > 0):
             
             spread = (ticker['ask'] - ticker['bid']) / ticker['ask'] * 100
             if spread < filters_cfg['max_spread_percent']:
@@ -377,12 +376,10 @@ async def run_momentum_breakout_scan(exchange: ccxt.Exchange, candidate: Dict) -
     """[FIXED] استراتيجية اختراق الزخم."""
     df = candidate['df_15m'].copy()
     
-    # Ensure indicators are calculated
     df.ta.macd(fast=12, slow=26, signal=9, append=True)
     df.ta.rsi(length=14, append=True)
     df.ta.bbands(length=20, std=2, append=True)
     
-    # Check if indicator columns were successfully created
     if not all(col in df.columns for col in ['MACD_12_26_9', 'MACDs_12_26_9', 'BBU_20_2.0', 'RSI_14']):
         logger.warning(f"Could not calculate all required indicators for {candidate['symbol']}.")
         return None
@@ -848,7 +845,7 @@ async def run_top_movers_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("حدث خطأ أثناء جلب البيانات.")
 
 async def calculate_pro_score(exchange: ccxt.Exchange, symbol: str) -> Optional[Dict]:
-    """[NEW] Calculates a technical score for a given symbol."""
+    """Calculates a technical score for a given symbol."""
     score = 0
     analysis = {'symbol': symbol}
     try:
@@ -884,7 +881,7 @@ async def calculate_pro_score(exchange: ccxt.Exchange, symbol: str) -> Optional[
         return None
 
 async def run_pro_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """[NEW] Performs a professional scan with a scoring system."""
+    """Performs a professional scan with a scoring system."""
     ex_id = context.user_data.get('active_manual_exchange', 'Binance')
     exchange = bot_state["exchanges"].get(ex_id)
     if not exchange:
@@ -950,7 +947,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "أهلاً بك في **بوت الصياد الهجين v1.7 (الإصدار المتقن)**!\n\n"
         "تم إصلاح الأخطاء وتحسين جودة التقارير وإضافة التحكم الكامل في المنصات."
     )
-    # Initialize user_data if it doesn't exist
     context.user_data.setdefault('active_manual_exchange', 'Binance')
     context.user_data.setdefault('next_step', None)
 
@@ -962,7 +958,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_data = context.user_data
     next_step = user_data.get('next_step')
 
-    # Handle state for symbol input
     if next_step == 'get_ta_symbol':
         user_data['next_step'] = None
         context.args = [text.strip()]
@@ -974,28 +969,32 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await run_scalp_analysis(update, context)
         return
 
-    handlers = {
-        "إيقاف المهام 🔴": toggle_tasks_command,
-        "تفعيل المهام 🟢": toggle_tasks_command,
-        "📊 تقرير الأداء": performance_report_command,
-        "📈 الصفقات النشطة": active_trades_command,
-        "⚙️ الإعدادات": lambda u, c: u.message.reply_text("اختر من قائمة الإعدادات:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True)),
-        "🔬 فحوصات يدوية": manual_scans_menu,
-        "🎭 الماسحات الآلية": scanners_menu_command,
-        "🏁 أنماط جاهزة": presets_menu_command,
-        "📊 منصة التقارير": select_manual_exchange_menu,
-        "🔙 القائمة الرئيسية": start_command,
-        "🔬 تحليل فني": lambda u, c: c.user_data.update({'next_step': 'get_ta_symbol'}) and u.message.reply_text("🔬 يرجى إرسال رمز العملة للتحليل المعمق (مثال: `BTC`)"),
-        "⚡️ تحليل سريع": lambda u, c: c.user_data.update({'next_step': 'get_scalp_symbol'}) and u.message.reply_text("⚡️ يرجى إرسال رمز العملة للتحليل السريع (مثال: `PEPE`)"),
-        "💎 صائد الجواهر": run_gem_hunter_scan,
-        "🎯 فحص احترافي": run_pro_scan,
-        "📈 الأعلى ربحاً": lambda u, c: run_top_movers_command(u, c, "gainers"),
-        "📉 الأعلى خسارة": lambda u, c: run_top_movers_command(u, c, "losers"),
-        "💰 الأعلى تداولاً": lambda u, c: run_top_movers_command(u, c, "volume"),
-    }
-    
-    if text in handlers:
-        await handlers[text](update, context)
+    # Regular button handlers
+    if text in ["إيقاف المهام 🔴", "تفعيل المهام 🟢"]: await toggle_tasks_command(update, context)
+    elif text == "📊 تقرير الأداء": await performance_report_command(update, context)
+    elif text == "📈 الصفقات النشطة": await active_trades_command(update, context)
+    elif text == "⚙️ الإعدادات": await update.message.reply_text("اختر من قائمة الإعدادات:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True))
+    elif text == "🔬 فحوصات يدوية": await manual_scans_menu(update, context)
+    elif text == "🎭 الماسحات الآلية": await scanners_menu_command(update, context)
+    elif text == "🏁 أنماط جاهزة": await presets_menu_command(update, context)
+    elif text == "📊 منصة التقارير": await select_manual_exchange_menu(update, context)
+    elif text == "🔙 القائمة الرئيسية": await start_command(update, context)
+    elif text == "🔬 تحليل فني":
+        user_data['next_step'] = 'get_ta_symbol'
+        await update.message.reply_text("🔬 يرجى إرسال رمز العملة للتحليل المعمق (مثال: `BTC`)")
+    elif text == "⚡️ تحليل سريع":
+        user_data['next_step'] = 'get_scalp_symbol'
+        await update.message.reply_text("⚡️ يرجى إرسال رمز العملة للتحليل السريع (مثال: `PEPE`)")
+    elif text == "💎 صائد الجواهر": await run_gem_hunter_scan(update, context)
+    elif text == "🎯 فحص احترافي": await run_pro_scan(update, context)
+    elif text == "📈 الأعلى ربحاً": await run_top_movers_command(update, context, "gainers")
+    elif text == "📉 الأعلى خسارة": await run_top_movers_command(update, context, "losers")
+    elif text == "💰 الأعلى تداولاً": await run_top_movers_command(update, context, "volume")
+    # [NEW] Manual Scan Handlers
+    elif text == "فحص القناص الآن": await run_manual_scanner(update, context, "sniper_pro")
+    elif text == "فحص الزخم الآن": await run_manual_scanner(update, context, "momentum_breakout")
+    elif text == "فحص الحيتان الآن": await run_manual_scanner(update, context, "whale_radar")
+
 
 async def toggle_tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggles the background tasks on or off."""
@@ -1055,7 +1054,7 @@ async def scanners_menu_command(update: Update, context: ContextTypes.DEFAULT_TY
         [InlineKeyboardButton(f"{'✅' if name in active_scanners else '❌'} {name}", callback_data=f"toggle_scanner_{name}")]
         for name in ACTIVE_SCANNERS.keys()
     ]
-    await update.message.reply_text("اختر الماسحات لتفعيلها أو تعطيلها:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("اختر الماسحات الآلية لتفعيلها أو تعطيلها:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def presets_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_preset = bot_state["settings"].get("active_preset_name", "N/A")
@@ -1086,6 +1085,43 @@ async def manual_scans_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "اختر فحصًا يدويًا لتشغيله على المنصة المحددة:",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
+
+async def run_manual_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE, scanner_name: str):
+    """[NEW] Wrapper to run a specific scanner on demand."""
+    ex_id = context.user_data.get('active_manual_exchange', 'Binance')
+    exchange = bot_state["exchanges"].get(ex_id)
+    if not exchange:
+        await update.message.reply_text(f"المنصة المحددة '{ex_id}' غير متصلة.")
+        return
+
+    await update.message.reply_text(f"🔬 جارِ بدء **{scanner_name}** على منصة **{ex_id}**...")
+    
+    try:
+        candidates = await pre_scan_filter(exchange)
+        if not candidates:
+            await update.message.reply_text("لم يتم العثور على عملات مرشحة بعد الفلترة الأولية.")
+            return
+
+        scanner_func = ACTIVE_SCANNERS.get(scanner_name)
+        if not scanner_func:
+            await update.message.reply_text("خطأ: الماسح المحدد غير موجود.")
+            return
+            
+        found_signals = []
+        for candidate in candidates:
+            signal = await scanner_func(exchange, candidate)
+            if signal:
+                found_signals.append(f"`{candidate['symbol']}` ({signal['strategy']})")
+        
+        if not found_signals:
+            await update.message.reply_text(f"✅ **الفحص اليدوي ({scanner_name}) اكتمل:**\n\nلم يتم العثور على إشارات جديدة على {ex_id}.")
+        else:
+            message = f"🎯 **نتائج الفحص اليدوي ({scanner_name}) على {ex_id}:**\n\n" + "\n".join(found_signals)
+            await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error during manual scan ({scanner_name}) on {ex_id}: {e}", exc_info=True)
+        await update.message.reply_text("حدث خطأ فادح أثناء الفحص اليدوي.")
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالجة ضغطات الأزرار (Inline Keyboard)."""
@@ -1146,7 +1182,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(perform_scan_and_trade, interval=timedelta(minutes=SCAN_INTERVAL_MINUTES), first=10, name='main_scan')
     job_queue.run_repeating(track_active_trades, interval=timedelta(minutes=TRACK_INTERVAL_MINUTES), first=20, name='trade_tracker')
     
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v1.7 متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v1.8 متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
     logger.info("Bot is fully initialized and background jobs are scheduled.")
 
 async def post_shutdown(application: Application):
@@ -1177,13 +1213,12 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     
-    # Add a basic error handler
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("Exception while handling an update:", exc_info=context.error)
 
     application.add_error_handler(error_handler)
 
-    logger.info("Starting Hybrid Hunter Bot v1.7...")
+    logger.info("Starting Hybrid Hunter Bot v1.8...")
     application.run_polling()
 
 if __name__ == '__main__':
