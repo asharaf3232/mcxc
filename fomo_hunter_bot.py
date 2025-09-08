@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 # ======================================================================================================================
-# == Hybrid Hunter Bot v3.0 | The Intelligent Version ================================================================
+# == Hybrid Hunter Bot v3.1 | The All-Seeing Version =================================================================
 # ======================================================================================================================
 #
-# v3.0 "تطويرات شاملة" Changelog:
-# - NEW (Risk Management): إدارة متقدمة للمخاطر! حجم الصفقة الآن نسبة مئوية من رأس المال الافتراضي المتنامي.
-# - NEW (Settings UI): واجهة إعدادات تفاعلية عبر محادثة تليجرام لتعديل أهم الإعدادات بسهولة.
-# - NEW (Caching): نظام تخزين مؤقت (Caching) لبيانات الشموع في قاعدة بيانات SQLite لتسريع التحليل وتقليل طلبات API.
-# - NEW (Advanced Order Simulation): إضافة استراتيجية جديدة "ارتداد الدعم" لمحاكاة أوامر LIMIT.
-# - NEW (Detailed Notifications): إشعارات دورية عن حالة البوت ورسائل تحذير عند حدوث أخطاء فادحة.
-# - IMPROVEMENT (Gem Hunter): تقرير "صائد الجواهر" أصبح أكثر تفصيلاً ويوضح سبب اختيار العملات.
-# - IMPROVEMENT (General): تحسينات شاملة على الأداء، معالجة الأخطاء، وهيكلة الكود.
+# v3.1 "مراقب الإدراجات" Changelog:
+# - NEW (New Listings Monitor): ميزة جديدة وقوية! يقوم البوت الآن بمراقبة جميع المنصات تلقائياً بحثاً عن أي عملات
+#   جديدة يتم إدراجها (أزواج /USDT)، ويرسل تنبيهاً فورياً عند اكتشافها.
+# - NEW (Manual Listings Check): تمت إضافة زر "📢 مراقبة الإدراجات" لواجهة المستخدم لبدء فحص يدوي فوري عن
+#   الإدراجات الجديدة في أي وقت.
+# - DB-ENHANCEMENT: تمت إضافة جدول جديد إلى قاعدة البيانات لتخزين العملات المعروفة وتتبع الإدراجات الجديدة بفعالية.
+# - STABILITY: تحسينات في آلية إعادة تحميل قوائم الأسواق لضمان الحصول على أحدث البيانات دائماً.
 #
 # ======================================================================================================================
 
@@ -71,7 +70,8 @@ logger = logging.getLogger(__name__)
 PLATFORMS = ["Binance", "MEXC", "Gateio", "Bybit", "KuCoin", "OKX"]
 SCAN_INTERVAL_MINUTES = 15
 TRACK_INTERVAL_MINUTES = 2
-SUMMARY_INTERVAL_HOURS = 6 # NEW: For periodic summary
+LISTINGS_CHECK_INTERVAL_MINUTES = 30 # NEW: For new listings check
+SUMMARY_INTERVAL_HOURS = 6
 UNWANTED_SYMBOL_SUBSTRINGS = ['UP/', 'DOWN/', '3L/', '5L/', '3S/', '5S/', 'BEAR/', 'BULL/', '/USDC', '/FDUSD', '/DAI']
 TELEGRAM_MAX_MSG_LENGTH = 4096
 
@@ -97,10 +97,10 @@ DEFAULT_SETTINGS = {
     "background_tasks_enabled": True,
     "active_manual_exchange": "Binance",
     "active_preset_name": "BALANCED",
-    "active_scanners": ["sniper_pro", "momentum_breakout", "whale_radar", "support_rebound"], # Added new scanner
+    "active_scanners": ["sniper_pro", "momentum_breakout", "whale_radar", "support_rebound"],
     "max_concurrent_trades": 75,
-    "initial_virtual_capital_usdt": 1000.0, # NEW: Initial capital
-    "trade_size_percent": 2.0, # NEW: Trade size as % of capital
+    "initial_virtual_capital_usdt": 1000.0,
+    "trade_size_percent": 2.0,
     "use_master_trend_filter": True,
     "master_trend_tf": "4h",
     "master_trend_ma": 50,
@@ -212,7 +212,7 @@ def setup_database():
                 trailing_sl_active BOOLEAN DEFAULT 0
             )
         """)
-        # NEW: Caching table for OHLCV data
+        # Caching table for OHLCV data
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ohlcv_cache (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -226,6 +226,15 @@ def setup_database():
                 close REAL NOT NULL,
                 volume REAL NOT NULL,
                 UNIQUE(exchange, symbol, timeframe, timestamp)
+            )
+        """)
+        # NEW: Table for tracking known symbols for new listings
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS known_symbols (
+                exchange TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                discovered_at TEXT NOT NULL,
+                PRIMARY KEY (exchange, symbol)
             )
         """)
         conn.commit()
@@ -249,8 +258,7 @@ async def initialize_exchanges():
             logger.info(f"Successfully connected to {ex_id}.")
         except Exception as e:
             logger.error(f"Failed to connect to {ex_id}: {e}")
-            # NEW: Critical error alert
-            if ex_id == "Binance": # Example: send alert if a critical exchange fails
+            if ex_id in ["Binance", "MEXC"]:
                 try:
                     bot = Application.builder().token(TELEGRAM_BOT_TOKEN).build().bot
                     await bot.send_message(
@@ -264,17 +272,15 @@ async def initialize_exchanges():
 
 async def fetch_ohlcv_cached(exchange: ccxt.Exchange, symbol: str, timeframe: str, limit: int) -> Optional[List]:
     """
-    NEW: Fetches OHLCV data, utilizing a local SQLite cache to speed up requests and reduce API calls.
+    Fetches OHLCV data, utilizing a local SQLite cache to speed up requests and reduce API calls.
     """
-    # Timeframe to seconds mapping
     tf_in_seconds = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400}
     now = int(time.time())
-    since = (now - limit * tf_in_seconds.get(timeframe, 900)) * 1000 # Default to 15m if not found
+    since = (now - limit * tf_in_seconds.get(timeframe, 900)) * 1000
 
     try:
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
-        # Fetch existing data from cache
         cursor.execute(
             "SELECT timestamp, open, high, low, close, volume FROM ohlcv_cache WHERE exchange = ? AND symbol = ? AND timeframe = ? AND timestamp >= ? ORDER BY timestamp ASC",
             (exchange.id, symbol, timeframe, since)
@@ -282,27 +288,20 @@ async def fetch_ohlcv_cached(exchange: ccxt.Exchange, symbol: str, timeframe: st
         cached_data = cursor.fetchall()
         conn.close()
 
-        # Check if cache is sufficient
         if cached_data:
             last_cached_ts = cached_data[-1][0] / 1000
-            # If the last candle is very recent, we can assume the data is fresh enough
             if now - last_cached_ts < tf_in_seconds.get(timeframe, 900):
                 logger.debug(f"CACHE HIT for {symbol} on {exchange.id} ({timeframe}).")
                 return [list(row) for row in cached_data[-limit:]]
 
-        # If cache is insufficient, fetch from exchange
         logger.debug(f"CACHE MISS for {symbol} on {exchange.id} ({timeframe}). Fetching from exchange.")
         async with api_semaphore:
             ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             if not ohlcv: return None
 
-        # Update cache with new data
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
-        data_to_insert = [
-            (exchange.id, symbol, timeframe, int(row[0]), row[1], row[2], row[3], row[4], row[5])
-            for row in ohlcv
-        ]
+        data_to_insert = [(exchange.id, symbol, timeframe, int(row[0]), row[1], row[2], row[3], row[4], row[5]) for row in ohlcv]
         cursor.executemany(
             "INSERT OR IGNORE INTO ohlcv_cache (exchange, symbol, timeframe, timestamp, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             data_to_insert
@@ -337,7 +336,6 @@ def find_support_resistance(high_prices, low_prices, window=10):
     for i in range(window, len(high_prices) - window):
         if high_prices[i] == max(high_prices[i-window:i+window+1]): resistances.append(high_prices[i])
         if low_prices[i] == min(low_prices[i-window:i+window+1]): supports.append(low_prices[i])
-    # Cluster nearby levels
     if not supports and not resistances: return [], []
     
     def cluster_levels(levels, tolerance_percent=0.5):
@@ -422,7 +420,6 @@ async def pre_scan_filter(exchange: ccxt.Exchange) -> List[Dict]:
     for candidate in candidates:
         symbol = candidate['symbol']
         await asyncio.sleep(exchange.rateLimit / 1000)
-        # USE CACHED FUNCTION
         ohlcv = await fetch_ohlcv_cached(exchange, symbol, '15m', 50)
         if not ohlcv or len(ohlcv) < 30: continue
 
@@ -445,7 +442,6 @@ async def get_master_trend(exchange: ccxt.Exchange) -> bool:
     """يحدد الاتجاه العام للسوق من خلال تحليل BTC/USDT."""
     settings = bot_state["settings"]
     try:
-        # USE CACHED FUNCTION
         ohlcv = await fetch_ohlcv_cached(exchange, 'BTC/USDT', settings["master_trend_tf"], settings["master_trend_ma"] + 5)
         if not ohlcv: return True
 
@@ -469,7 +465,6 @@ async def run_sniper_pro_scan(exchange: ccxt.Exchange, candidate: Dict) -> Optio
     symbol = candidate['symbol']
     filters_cfg = bot_state["settings"]["filters"]
     compression_candles = int(bot_state["settings"]["sniper_compression_hours"] * 4)
-    # USE CACHED FUNCTION
     ohlcv = await fetch_ohlcv_cached(exchange, symbol, '15m', compression_candles + 20)
     if not ohlcv or len(ohlcv) < compression_candles: return None
 
@@ -530,10 +525,9 @@ async def run_whale_radar_scan(exchange: ccxt.Exchange, candidate: Dict) -> Opti
     return None
 
 async def run_support_rebound_scan(exchange: ccxt.Exchange, candidate: Dict) -> Optional[Dict]:
-    """NEW: تبحث عن ارتداد من مستوى دعم مهم."""
+    """تبحث عن ارتداد من مستوى دعم مهم."""
     symbol = candidate['symbol']
     try:
-        # USE CACHED FUNCTION
         ohlcv_1h = await fetch_ohlcv_cached(exchange, symbol, '1h', 100)
         if not ohlcv_1h or len(ohlcv_1h) < 50: return None
 
@@ -543,19 +537,14 @@ async def run_support_rebound_scan(exchange: ccxt.Exchange, candidate: Dict) -> 
         supports, _ = find_support_resistance(df_1h['high'].to_numpy(), df_1h['low'].to_numpy(), window=5)
         if not supports: return None
 
-        # Find the closest support level below the current price
         closest_support = max([s for s in supports if s < current_price], default=None)
         if not closest_support: return None
 
-        # Check if price is near the support level (e.g., within 1%)
         if (current_price - closest_support) / closest_support * 100 < 1.0:
-            # Check for confirmation on 15m (e.g., bullish engulfing or high volume)
             df_15m = candidate['df_15m']
             last_candle = df_15m.iloc[-2]
-            prev_candle = df_15m.iloc[-3]
             avg_volume = df_15m['volume'].rolling(window=20).mean().iloc[-2]
 
-            # Simple bullish confirmation: closed higher than open with decent volume
             if last_candle['close'] > last_candle['open'] and last_candle['volume'] > avg_volume * 1.5:
                  return {"strategy": "Support Rebound", "entry_price": current_price}
         return None
@@ -567,7 +556,7 @@ ACTIVE_SCANNERS = {
     "sniper_pro": run_sniper_pro_scan,
     "momentum_breakout": run_momentum_breakout_scan,
     "whale_radar": run_whale_radar_scan,
-    "support_rebound": run_support_rebound_scan, # NEW
+    "support_rebound": run_support_rebound_scan,
 }
 
 # =============================================================================
@@ -575,7 +564,7 @@ ACTIVE_SCANNERS = {
 # =============================================================================
 
 async def get_virtual_capital() -> float:
-    """NEW: Calculates the current virtual capital based on initial capital and PnL."""
+    """Calculates the current virtual capital based on initial capital and PnL."""
     try:
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
@@ -633,7 +622,6 @@ async def perform_scan_and_trade(context: ContextTypes.DEFAULT_TYPE):
                             break
     except Exception as e:
         logger.error(f"Critical error during scan cycle: {e}", exc_info=True)
-        # NEW: Critical error alert
         await context.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
             text=f"🔴 **خطأ فادح في دورة الفحص الرئيسية!**\nقد تتوقف عمليات الفحص التلقائي.\nالخطأ: `{e}`",
@@ -648,14 +636,12 @@ async def process_new_signal(bot, exchange: ccxt.Exchange, symbol: str, signal: 
     settings = bot_state["settings"]
     entry_price = signal['entry_price']
 
-    # NEW: Dynamic trade size calculation
     virtual_capital = await get_virtual_capital()
     trade_size_usdt = virtual_capital * (settings.get("trade_size_percent", 1.0) / 100)
 
     exchange_name_to_store = next((p for p in PLATFORMS if p.lower() == exchange.id.lower()), exchange.id.capitalize())
 
     try:
-        # USE CACHED FUNCTION
         ohlcv = await fetch_ohlcv_cached(exchange, symbol, '15m', 20)
         if not ohlcv: return
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -731,7 +717,6 @@ async def track_active_trades(context: ContextTypes.DEFAULT_TYPE):
 
         logger.info(f"Tracking #{trade['id']} ({trade['symbol']}): Price={current_price:.4f}, TP={trade['take_profit']:.4f}, SL={trade['current_stop_loss']:.4f}")
 
-        # Check for TP/SL triggers
         if current_price >= trade['take_profit']:
             await close_trade(context.bot, trade, current_price, 'Take Profit Hit')
             continue
@@ -739,23 +724,19 @@ async def track_active_trades(context: ContextTypes.DEFAULT_TYPE):
             await close_trade(context.bot, trade, current_price, 'Stop Loss Hit')
             continue
 
-        # Trailing Stop Loss Logic
         if settings["use_trailing_sl"]:
             highest_price = max(trade.get('highest_price', current_price), current_price)
             if not trade['trailing_sl_active']:
-                # Activate TSL
                 activation_price = trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100)
                 if current_price >= activation_price:
-                    new_stop_loss = trade['entry_price'] # Move SL to entry
+                    new_stop_loss = trade['entry_price']
                     if new_stop_loss > trade['current_stop_loss']:
                          await update_trade_sl(context.bot, trade['id'], new_stop_loss, highest_price, is_activation=True)
             else:
-                # Update active TSL
                 new_stop_loss = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
                 if new_stop_loss > trade['current_stop_loss']:
                     await update_trade_sl(context.bot, trade['id'], new_stop_loss, highest_price)
 
-            # Update peak price if it has increased
             if highest_price > trade.get('highest_price', 0):
                  await update_trade_peak_price(trade['id'], highest_price)
 
@@ -842,7 +823,6 @@ async def run_full_technical_analysis(update: Update, context: ContextTypes.DEFA
         report_parts = [f"📊 **التحليل الفني المفصل لـ ${symbol}** ({exchange.id})\n\n"]
 
         for tf_name, tf_interval in timeframes.items():
-            # USE CACHED FUNCTION
             ohlcv = await fetch_ohlcv_cached(exchange, symbol, tf_interval, 200)
             tf_report = f"--- **إطار {tf_name}** ---\n"
             if not ohlcv or len(ohlcv) < 100:
@@ -910,7 +890,6 @@ async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
         final_summary_points = []
 
         for tf_name, tf_interval in timeframes.items():
-            # USE CACHED FUNCTION
             ohlcv = await fetch_ohlcv_cached(exchange, symbol, tf_interval, 50)
             tf_report = f"\n--- **إطار {tf_name}** ---\n"
             if not ohlcv or len(ohlcv) < 20:
@@ -921,7 +900,6 @@ async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             current_price = df['close'].iloc[-1]
 
-            # Volume analysis
             avg_volume = df['volume'][-20:-1].mean()
             last_volume = df['volume'].iloc[-1]
             vol_ratio = last_volume / avg_volume if avg_volume > 0 else 0
@@ -931,7 +909,6 @@ async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
             else:
                 tf_report += f"🟡 **الفوليوم:** عادي.\n"
 
-            # Short-term trend analysis
             ema9 = ta.ema(df['close'], length=9).iloc[-1]
             if current_price > ema9:
                 tf_report += f"🟢 **الاتجاه القصير:** إيجابي (فوق EMA9).\n"
@@ -939,7 +916,6 @@ async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
             else:
                 tf_report += f"🔴 **الاتجاه القصير:** سلبي (تحت EMA9).\n"
 
-            # Volatility analysis
             atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
             atr_percent = (atr / current_price) * 100
             if atr_percent > 0.5:
@@ -950,7 +926,6 @@ async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             report_parts.append(tf_report)
 
-        # Final Summary
         summary = "\n--- **الخلاصة** ---\n"
         if "فوليوم عالٍ على 5 دقائق" in final_summary_points and "اتجاه إيجابي قصير" in final_summary_points:
             summary += "🟢 **زخم صاعد قوي،** قد تكون مناسبة للمراقبة والدخول السريع."
@@ -968,7 +943,7 @@ async def run_scalp_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @user_task_lock
 async def run_gem_hunter_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """IMPROVED: Scans the active exchange for gems and provides a richer report."""
+    """Scans the active exchange for gems and provides a richer report."""
     ex_id = context.user_data.get('active_manual_exchange', 'Binance')
     exchange = bot_state["exchanges"].get(ex_id)
     if not exchange:
@@ -989,7 +964,6 @@ async def run_gem_hunter_scan(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             for symbol in symbols_to_check:
                 await asyncio.sleep(exchange.rateLimit / 1000)
-                # USE CACHED FUNCTION
                 ohlcv = await fetch_ohlcv_cached(exchange, symbol, '1d', 1000)
                 if not ohlcv or len(ohlcv) < 30: continue
 
@@ -1008,11 +982,8 @@ async def run_gem_hunter_scan(update: Update, context: ContextTypes.DEFAULT_TYPE
                     potential_x = ath / current
                     if potential_x < 1_000_000:
                         platform_gems.append({
-                            'symbol': symbol,
-                            'potential_x': potential_x,
-                            'correction_percent': correction,
-                            'current_price': current,
-                            'ath': ath
+                            'symbol': symbol, 'potential_x': potential_x,
+                            'correction_percent': correction, 'current_price': current, 'ath': ath
                         })
 
             return sorted(platform_gems, key=lambda x: x['potential_x'], reverse=True)[:10]
@@ -1026,12 +997,11 @@ async def run_gem_hunter_scan(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"✅ **بحث الجواهر اكتمل:** لم يتم العثور على عملات تتوافق مع الشروط على منصة {ex_id}.")
         return
 
-    # NEW: Richer report
     message = (
         f"💎 **تقرير الجواهر المخفية ({ex_id})** 💎\n\n"
         f"**لماذا تم اختيار هذه العملات؟**\n"
-        f"تم اختيارها لأنها مدرجة منذ أقل من سنة، ولديها حجم تداول جيد، "
-        f"وقد شهدت تصحيحاً كبيراً من قمتها التاريخية (ATH)، "
+        f"تم اختيارها لأنها مدرجة منذ أقل من سنة، ولديها حجم تداول جيد, "
+        f"وقد شهدت تصحيحاً كبيراً من قمتها التاريخية (ATH), "
         f"والآن تظهر علامات انتعاش من قاعها (ATL).\n\n"
         "--- **أفضل المرشحين** ---\n"
     )
@@ -1048,11 +1018,7 @@ async def run_gem_hunter_scan(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def get_top_movers_data(exchange: ccxt.Exchange, mode: str) -> List[str]:
     """Helper function to fetch and format top movers data."""
-    modes = {
-        "gainers": {"key": "change", "reverse": True},
-        "losers": {"key": "change", "reverse": False},
-        "volume": {"key": "quoteVolume", "reverse": True}
-    }
+    modes = {"gainers": {"key": "change", "reverse": True}, "losers": {"key": "change", "reverse": False}, "volume": {"key": "quoteVolume", "reverse": True}}
     config = modes[mode]
 
     try:
@@ -1064,8 +1030,7 @@ async def get_top_movers_data(exchange: ccxt.Exchange, mode: str) -> List[str]:
                     open_price, last_price = t.get('open'), t.get('last')
                     if open_price and last_price and open_price > 0:
                         t['change'] = ((last_price - open_price) / open_price) * 100
-                    else:
-                        t['change'] = 0
+                    else: t['change'] = 0
                 valid_tickers.append(t)
 
         sorted_tickers = sorted(valid_tickers, key=lambda x: x.get(config['key'], 0) or 0, reverse=config['reverse'])[:5]
@@ -1073,8 +1038,7 @@ async def get_top_movers_data(exchange: ccxt.Exchange, mode: str) -> List[str]:
         report_lines = []
         for i, coin in enumerate(sorted_tickers):
             symbol_name = coin['symbol'].replace('/USDT', '')
-            if mode != 'volume':
-                stat = f"`%{coin.get('change', 0):+.2f}`"
+            if mode != 'volume': stat = f"`%{coin.get('change', 0):+.2f}`"
             else:
                 volume = coin.get('quoteVolume', 0)
                 stat = f"`${volume/1_000_000:.2f}M`"
@@ -1098,7 +1062,6 @@ async def run_market_summary_command(update: Update, context: ContextTypes.DEFAU
     gainers_task = get_top_movers_data(exchange, 'gainers')
     losers_task = get_top_movers_data(exchange, 'losers')
     volume_task = get_top_movers_data(exchange, 'volume')
-
     gainers, losers, volume = await asyncio.gather(gainers_task, losers_task, volume_task)
 
     message = f"📊 **ملخص السوق لمنصة {ex_id}** 📊\n\n"
@@ -1158,7 +1121,6 @@ async def run_pro_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         strong_opportunities = []
         for symbol in candidates[:150]:
              await asyncio.sleep(exchange.rateLimit / 2000)
-             # USE CACHED FUNCTION
              ohlcv = await fetch_ohlcv_cached(exchange, symbol, '15m', 100)
              if not ohlcv or len(ohlcv) < 50: continue
 
@@ -1185,6 +1147,83 @@ async def run_pro_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("حدث خطأ فادح أثناء الفحص الاحترافي.")
 
 # =============================================================================
+# --- 📢 9. مراقب الإدراجات الجديدة 📢 ---
+# =============================================================================
+async def scan_for_new_listings() -> Dict[str, List[str]]:
+    """Scans all exchanges and returns a dictionary of new listings."""
+    logger.info("Scanning for new listings...")
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) FROM known_symbols")
+    is_initial_run = cursor.fetchone()[0] == 0
+    if is_initial_run:
+        logger.info("Initial run: populating known_symbols table.")
+
+    all_new_listings = {}
+
+    for ex_id, exchange in bot_state["exchanges"].items():
+        try:
+            await exchange.load_markets(True) # Force refresh
+            current_symbols = {s for s in exchange.symbols if s.endswith('/USDT') and not is_symbol_unwanted(s)}
+            
+            cursor.execute("SELECT symbol FROM known_symbols WHERE exchange = ?", (ex_id,))
+            known_symbols = {row[0] for row in cursor.fetchall()}
+            
+            if is_initial_run:
+                symbols_to_add = [(ex_id, s, datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')) for s in current_symbols]
+                if symbols_to_add:
+                    cursor.executemany("INSERT OR IGNORE INTO known_symbols (exchange, symbol, discovered_at) VALUES (?, ?, ?)", symbols_to_add)
+            else:
+                newly_listed = current_symbols - known_symbols
+                if newly_listed:
+                    all_new_listings[ex_id] = sorted(list(newly_listed))
+                    symbols_to_add = [(ex_id, s, datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')) for s in newly_listed]
+                    if symbols_to_add:
+                        cursor.executemany("INSERT OR IGNORE INTO known_symbols (exchange, symbol, discovered_at) VALUES (?, ?, ?)", symbols_to_add)
+        except Exception as e:
+            logger.error(f"Could not check listings for {ex_id}: {e}")
+    
+    conn.commit()
+    conn.close()
+    
+    if is_initial_run:
+        logger.info("Finished populating known symbols database.")
+        return {} # Return nothing on first run
+    
+    return all_new_listings
+
+async def periodic_listings_check(context: ContextTypes.DEFAULT_TYPE):
+    """Job function to periodically check for new listings and send alerts."""
+    if not bot_state["settings"].get("background_tasks_enabled", True): return
+    new_listings = await scan_for_new_listings()
+    if new_listings:
+        message_parts = ["🚨 **تنبيه إدراجات جديدة!** 🚨\n"]
+        for ex_id, symbols in new_listings.items():
+            message_parts.append(f"\n--- **منصة {ex_id}** ---")
+            for symbol in symbols:
+                message_parts.append(f"  - `{symbol}`")
+        message = "\n".join(message_parts)
+        await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+
+@user_task_lock
+async def manual_check_listings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Command to manually check for new listings."""
+    await update.message.reply_text("🔍 جارِ البحث يدوياً عن أي إدراجات جديدة...")
+    new_listings = await scan_for_new_listings()
+
+    if new_listings:
+        message_parts = ["🚨 **تنبيه إدراجات جديدة!** 🚨\n"]
+        for ex_id, symbols in new_listings.items():
+            message_parts.append(f"\n--- **منصة {ex_id}** ---")
+            for symbol in symbols:
+                message_parts.append(f"  - `{symbol}`")
+        message = "\n".join(message_parts)
+        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text("✅ لم يتم العثور على أي إدراجات جديدة منذ آخر فحص.")
+
+# =============================================================================
 # --- 🤖 10. أوامر التليجرام وواجهة المستخدم 🤖 ---
 # =============================================================================
 
@@ -1196,7 +1235,7 @@ def build_main_menu() -> ReplyKeyboardMarkup:
     keyboard = [
         ["🔬 تحليل فني", "⚡️ تحليل سريع"],
         ["🎯 فحص احترافي", "💎 صائد الجواهر"],
-        ["📊 ملخص السوق"],
+        ["📢 مراقبة الإدراجات", "📊 ملخص السوق"],
         ["📊 تقرير الأداء", "📈 الصفقات النشطة"],
         [toggle_button_text],
         ["⚙️ الإعدادات", "⚙️ الإعدادات المتقدمة"],
@@ -1212,8 +1251,8 @@ settings_menu_keyboard = [
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر البدء."""
     welcome_message = (
-        "أهلاً بك في **بوت الصياد الهجين v3.0 (النسخة الذكية)**!\n\n"
-        "تمت إضافة العديد من الميزات المتقدمة لتحسين تجربة التداول الافتراضي."
+        "أهلاً بك في **بوت الصياد الهجين v3.1 (نسخة مراقب الإدراجات)**!\n\n"
+        "تمت إضافة ميزة مراقبة الإدراجات الجديدة. أنا أراقب السوق من أجلك!"
     )
     context.user_data.setdefault('active_manual_exchange', 'Binance')
     context.user_data.setdefault('next_step', None)
@@ -1255,6 +1294,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif text == "💎 صائد الجواهر": await run_gem_hunter_scan(update, context)
     elif text == "🎯 فحص احترافي": await run_pro_scan(update, context)
     elif text == "📊 ملخص السوق": await run_market_summary_command(update, context)
+    elif text == "📢 مراقبة الإدراجات": await manual_check_listings_command(update, context)
 
 
 async def toggle_tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1282,7 +1322,7 @@ async def performance_report_command(update: Update, context: ContextTypes.DEFAU
         successful_trades = cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'Closed' and pnl_usdt > 0").fetchone()[0]
         total_pnl = cursor.execute("SELECT SUM(pnl_usdt) FROM trades WHERE status = 'Closed'").fetchone()[0] or 0
         win_rate = (successful_trades / total_trades * 100) if total_trades > 0 else 0
-        virtual_capital = await get_virtual_capital() # Get current capital
+        virtual_capital = await get_virtual_capital()
 
         report = [
             f"📊 **تقرير الأداء الشامل** 📊\n",
@@ -1354,10 +1394,8 @@ async def active_trades_command(update: Update, context: ContextTypes.DEFAULT_TY
             start_index = page_num * page_size
             end_index = start_index + page_size
             page_trades = all_trade_reports[start_index:end_index]
-
             header = f"📈 **تقرير الصفقات النشطة (صفحة {page_num + 1}/{total_pages})** 📈\n\n"
             message = header + "\n".join(page_trades)
-
             await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
             await asyncio.sleep(0.5)
 
@@ -1401,7 +1439,6 @@ async def run_diagnostic_report(update: Update, context: ContextTypes.DEFAULT_TY
     report.append(f"- الماسحات النشطة: `{', '.join(settings.get('active_scanners', []))}`")
     report.append(f"- منصة التقارير اليدوية: `{context.user_data.get('active_manual_exchange', 'N/A')}`\n")
     
-    # NEW: Risk settings report
     report.append("--- **إعدادات المخاطر** ---")
     report.append(f"- رأس المال الافتراضي الأولي: `${settings.get('initial_virtual_capital_usdt', 0)}`")
     report.append(f"- حجم الصفقة: `{settings.get('trade_size_percent', 0)}%` من رأس المال")
@@ -1421,20 +1458,21 @@ async def run_diagnostic_report(update: Update, context: ContextTypes.DEFAULT_TY
         status = '✅ متصل' if ex_id in bot_state["exchanges"] and bot_state["exchanges"][ex_id].markets else '❌ فشل الاتصال'
         report.append(f"- {ex_id}: `{status}`")
         
-    # NEW: Cache status
     try:
         conn = sqlite3.connect(DATABASE_FILE)
-        cache_count = conn.cursor().execute("SELECT COUNT(*) FROM ohlcv_cache").fetchone()[0]
+        cursor = conn.cursor()
+        cache_count = cursor.execute("SELECT COUNT(*) FROM ohlcv_cache").fetchone()[0]
+        known_symbols_count = cursor.execute("SELECT COUNT(*) FROM known_symbols").fetchone()[0]
         conn.close()
-        report.append(f"\n--- **حالة التخزين المؤقت** ---\n- عدد الشموع المخزنة: `{cache_count}`")
-    except Exception as e:
-        logger.warning(f"Could not get cache status: {e}")
-
+        report.append(f"\n--- **حالة قاعدة البيانات** ---")
+        report.append(f"- الشموع المخزنة (Cache): `{cache_count}`")
+        report.append(f"- العملات المعروفة (للمراقبة): `{known_symbols_count}`")
+    except Exception as e: logger.warning(f"Could not get DB status: {e}")
 
     await update.message.reply_text("\n".join(report), parse_mode=ParseMode.MARKDOWN)
 
 # =============================================================================
-# --- ⚙️ 10.1. واجهة الإعدادات المتقدمة (Conversation Handler) ⚙️ ---
+# --- ⚙️ 11. واجهة الإعدادات المتقدمة (Conversation Handler) ⚙️ ---
 # =============================================================================
 
 EDITABLE_SETTINGS = {
@@ -1485,19 +1523,19 @@ async def receive_new_setting_value(update: Update, context: ContextTypes.DEFAUL
 
     setting_info = EDITABLE_SETTINGS[setting_key]
     try:
-        new_value = setting_info['type'](new_value_str) # Validate and cast type
+        new_value = setting_info['type'](new_value_str)
         if new_value <= 0:
              await update.message.reply_text("❌ القيمة يجب أن تكون أكبر من صفر. يرجى المحاولة مرة أخرى.")
              return TYPING_VALUE
 
         bot_state["settings"][setting_key] = new_value
         save_settings()
-        load_settings() # Reload to ensure consistency
+        load_settings()
         await update.message.reply_text(f"✅ تم تحديث **{setting_info['name']}** بنجاح إلى `{new_value}`.", reply_markup=build_main_menu())
 
     except (ValueError, TypeError):
         await update.message.reply_text(f"❌ قيمة غير صالحة. الرجاء إدخال رقم صحيح من النوع ({setting_info['type'].__name__}).")
-        return TYPING_VALUE # Ask again
+        return TYPING_VALUE
 
     context.user_data.pop('setting_to_edit', None)
     return ConversationHandler.END
@@ -1552,11 +1590,11 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(f"✅ تم تحديد منصة التقارير إلى: **{exchange_name}**", parse_mode=ParseMode.MARKDOWN)
 
 # =============================================================================
-# --- 🚀 11. نقطة انطلاق البوت 🚀 ---
+# --- 🚀 12. نقطة انطلاق البوت 🚀 ---
 # =============================================================================
 
 async def send_periodic_summary(context: ContextTypes.DEFAULT_TYPE):
-    """NEW: Sends a periodic summary of the bot's status."""
+    """Sends a periodic summary of the bot's status."""
     if not bot_state["settings"].get("background_tasks_enabled", True): return
     
     try:
@@ -1604,8 +1642,9 @@ async def post_init(application: Application):
     job_queue.run_repeating(perform_scan_and_trade, interval=timedelta(minutes=SCAN_INTERVAL_MINUTES), first=10, name='main_scan')
     job_queue.run_repeating(track_active_trades, interval=timedelta(minutes=TRACK_INTERVAL_MINUTES), first=20, name='trade_tracker')
     job_queue.run_repeating(send_periodic_summary, interval=timedelta(hours=SUMMARY_INTERVAL_HOURS), first=60, name='periodic_summary')
+    job_queue.run_repeating(periodic_listings_check, interval=timedelta(minutes=LISTINGS_CHECK_INTERVAL_MINUTES), first=45, name='new_listings_checker')
 
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v3.0 متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v3.1 متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
     logger.info("Bot is fully initialized and background jobs are scheduled.")
 
 async def post_shutdown(application: Application):
@@ -1629,7 +1668,6 @@ def main() -> None:
         .build()
     )
 
-    # Conversation handler for advanced settings
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^⚙️ الإعدادات المتقدمة$'), advanced_settings_start)],
         states={
@@ -1654,7 +1692,7 @@ def main() -> None:
 
     application.add_error_handler(error_handler)
 
-    logger.info("Starting Hybrid Hunter Bot v3.0...")
+    logger.info("Starting Hybrid Hunter Bot v3.1...")
     application.run_polling()
 
 if __name__ == '__main__':
