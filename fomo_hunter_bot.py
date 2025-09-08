@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 # ======================================================================================================================
-# == Hybrid Hunter Bot v1.4 | بوت الصياد الهجين ========================================================================
+# == Hybrid Hunter Bot v1.5 | بوت الصياد الهجين ========================================================================
 # ======================================================================================================================
 #
-# v1.4 Changelog:
-# - CONFIGURATION: Added a clear, dedicated section at the top for users to input their Bot Token and Chat ID.
-# - CLARITY: Improved comments to make the configuration process more straightforward.
+# v1.5 Changelog:
+# - FIX: Corrected the environment variable name for the chat ID from `TELEGRAM_ADMIN_CHAT_ID` to `TELEGRAM_CHAT_ID`
+#   to match standard deployment configurations and resolve the startup error.
 #
 # ======================================================================================================================
 
@@ -43,11 +43,12 @@ from telegram.ext import (
 # =======================================================================================
 # == !! هام جداً: أدخل بياناتك هنا !! ====================================================
 # =======================================================================================
-# 1. استبدل 'YOUR_TELEGRAM_BOT_TOKEN' بالتوكن الخاص بالبوت الذي أنشأته من BotFather.
-# 2. استبدل 'YOUR_CHAT_ID' بمعرف الدردشة الخاص بك (يمكنك الحصول عليه من بوتات مثل @userinfobot).
+# 1. يمكنك إدخال بياناتك مباشرة هنا أو تعيينها كمتغيرات بيئة (Environment Variables)
+#    في سيرفر الاستضافة الخاص بك. الطريقة الثانية هي الأكثر أمانًا.
 # =======================================================================================
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_ADMIN_CHAT_ID', 'YOUR_CHAT_ID')
+# [FIXED] Changed variable name to match user's environment variable
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID')
 # =======================================================================================
 
 DATABASE_FILE = "hybrid_hunter.db"
@@ -509,7 +510,7 @@ async def process_new_signal(bot, exchange: ccxt.Exchange, symbol: str, signal: 
             f"🛑 **الوقف:** `{format_price(stop_loss)}`\n\n"
             f"*ID: {trade_id}*"
         )
-        await bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info(f"Successfully processed and sent signal for {symbol} (ID: {trade_id})")
 
     except Exception as e:
@@ -583,7 +584,7 @@ async def close_trade(bot, trade: Dict, exit_price: float, reason: str):
             f"▫️ **السبب:** *{reason}*\n"
             f"▫️ **الربح/الخسارة:** `${pnl_usdt:+.2f}` (`{pnl_percent:+.2f}%`)"
         )
-        await bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info(f"Trade {trade['id']} ({trade['symbol']}) closed. Reason: {reason}. PnL: ${pnl_usdt:.2f}")
 
     except Exception as e:
@@ -600,7 +601,7 @@ async def update_trade_sl(bot, trade_id: int, new_sl: float, highest_price: floa
         
         if is_activation:
             message = f"🔒 **تأمين صفقة (ID: {trade_id})** 🔒\nتم نقل وقف الخسارة إلى نقطة الدخول: `{format_price(new_sl)}`"
-            await bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
             logger.info(f"Trailing SL activated for trade {trade_id}. New SL: {new_sl}")
         else:
              logger.info(f"Trailing SL updated for trade {trade_id}. New SL: {new_sl}")
@@ -1093,7 +1094,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(perform_scan_and_trade, interval=timedelta(minutes=SCAN_INTERVAL_MINUTES), first=10, name='main_scan')
     job_queue.run_repeating(track_active_trades, interval=timedelta(minutes=TRACK_INTERVAL_MINUTES), first=20, name='trade_tracker')
     
-    await application.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text="✅ **بوت الصياد الهجين v1.3 متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v1.3 متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
     logger.info("Bot is fully initialized and background jobs are scheduled.")
 
 async def post_shutdown(application: Application):
@@ -1105,7 +1106,7 @@ async def post_shutdown(application: Application):
 
 def main() -> None:
     """الوظيفة الرئيسية لتشغيل البوت."""
-    if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN or 'YOUR_CHAT' in TELEGRAM_ADMIN_CHAT_ID:
+    if 'YOUR_TELEGRAM' in TELEGRAM_BOT_TOKEN or 'YOUR_CHAT' in TELEGRAM_CHAT_ID:
         logger.critical("FATAL ERROR: Bot token or Admin Chat ID is not set in environment variables.")
         return
         
