@@ -745,6 +745,25 @@ async def close_trade(bot, trade: Dict, exit_price: float, reason: str):
     pnl_usdt = (exit_price - trade['entry_price']) / trade['entry_price'] * trade['trade_value_usdt']
     pnl_percent = pnl_usdt / trade['trade_value_usdt'] * 100
 
+    # --- تعديل: حساب مدة الصفقة ---
+    duration_str = "N/A"
+    try:
+        entry_time = datetime.strptime(trade['timestamp'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+        close_time = datetime.now(timezone.utc)
+        duration = close_time - entry_time
+        
+        days = duration.days
+        hours, remainder = divmod(duration.seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+        
+        parts = []
+        if days > 0: parts.append(f"{days} يوم")
+        if hours > 0: parts.append(f"{hours} ساعة")
+        if minutes > 0 or not parts: parts.append(f"{minutes} دقيقة")
+        duration_str = "، ".join(parts)
+    except Exception as e:
+        logger.warning(f"Could not calculate duration for trade #{trade['id']}: {e}")
+
     try:
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
@@ -754,12 +773,20 @@ async def close_trade(bot, trade: Dict, exit_price: float, reason: str):
         conn.commit()
         conn.close()
 
+        # --- تعديل: تنسيق الرسالة لتكون أكثر شمولاً ---
         icon = "✅" if pnl_usdt >= 0 else "❌"
+        reason_icon = "🎯" if "Take Profit" in reason else "🛑"
         message = (
             f"{icon} **تم إغلاق الصفقة #{trade['id']}** {icon}\n\n"
+            f"{reason_icon} **السبب:** *{reason}*\n"
+            f"━━━━━━━━━━━━━━\n"
             f"▫️ **العملة:** `{trade['symbol']}`\n"
-            f"▫️ **السبب:** *{reason}*\n"
-            f"▫️ **الربح/الخسارة:** `${pnl_usdt:+.2f}` (`{pnl_percent:+.2f}%`)"
+            f"▫️ **الاستراتيجية:** `{trade['strategy']}`\n"
+            f"▫️ **مدة الصفقة:** `{duration_str}`\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"📈 **سعر الدخول:** `{format_price(trade['entry_price'])}`\n"
+            f"📉 **سعر الخروج:** `{format_price(exit_price)}`\n"
+            f"💰 **الربح/الخسارة:** **`${pnl_usdt:+.2f}`** (`{pnl_percent:+.2f}%`)"
         )
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
         logger.info(f"Trade {trade['id']} ({trade['symbol']}) closed. Reason: {reason}. PnL: ${pnl_usdt:.2f}")
@@ -1697,4 +1724,5 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
