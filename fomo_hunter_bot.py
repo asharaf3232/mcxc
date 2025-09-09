@@ -168,9 +168,16 @@ async def send_message_to_targets(bot, message: str, parse_mode: str = ParseMode
     # Send to channel if configured
     if TELEGRAM_CHANNEL_ID:
         try:
-            await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=message, parse_mode=parse_mode)
+            # Clean the channel ID just in case
+            clean_channel_id = TELEGRAM_CHANNEL_ID.strip().replace("=", "")
+            await bot.send_message(chat_id=clean_channel_id, text=message, parse_mode=parse_mode)
         except Forbidden:
             logger.error(f"Failed to send message to channel ({TELEGRAM_CHANNEL_ID}). Bot might not be an admin or was kicked.")
+        except BadRequest as e:
+            if "Chat not found" in str(e):
+                 logger.error(f"Failed to send message to channel ({TELEGRAM_CHANNEL_ID}): Chat not found. Please check the Channel ID and bot's admin permissions.")
+            else:
+                 logger.error(f"Failed to send message to channel ({TELEGRAM_CHANNEL_ID}): {e}")
         except Exception as e:
             logger.error(f"Failed to send message to channel ({TELEGRAM_CHANNEL_ID}): {e}")
 
@@ -305,7 +312,7 @@ async def fetch_ohlcv_cached(exchange: ccxt.Exchange, symbol: str, timeframe: st
     since = (now - limit * tf_in_seconds.get(timeframe, 900)) * 1000
 
     try:
-        conn = sqlite3.connect(DATABASE_FILE)
+        conn = sqlite3.connect(DATABASE_FILE, timeout=10) # Added timeout
         cursor = conn.cursor()
         cursor.execute(
             "SELECT timestamp, open, high, low, close, volume FROM ohlcv_cache WHERE exchange = ? AND symbol = ? AND timeframe = ? AND timestamp >= ? ORDER BY timestamp ASC",
@@ -325,7 +332,7 @@ async def fetch_ohlcv_cached(exchange: ccxt.Exchange, symbol: str, timeframe: st
             ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             if not ohlcv: return None
 
-        conn = sqlite3.connect(DATABASE_FILE)
+        conn = sqlite3.connect(DATABASE_FILE, timeout=10) # Added timeout
         cursor = conn.cursor()
         data_to_insert = [(exchange.id, symbol, timeframe, int(row[0]), row[1], row[2], row[3], row[4], row[5]) for row in ohlcv]
         cursor.executemany(
@@ -338,6 +345,12 @@ async def fetch_ohlcv_cached(exchange: ccxt.Exchange, symbol: str, timeframe: st
 
     except ccxt.BadSymbol:
         logger.warning(f"Symbol {symbol} not found on {exchange.id}.")
+        return None
+    except sqlite3.OperationalError as e:
+        if "database is locked" in str(e):
+            logger.warning(f"Database is locked while fetching/caching OHLCV for {symbol}. Retrying might be needed.")
+        else:
+            logger.error(f"SQLite error for {symbol}: {e}")
         return None
     except Exception as e:
         logger.warning(f"Could not fetch/cache OHLCV for {symbol} on {exchange.id}: {e}")
@@ -638,7 +651,7 @@ ACTIVE_SCANNERS = {
 async def get_virtual_capital() -> float:
     """Calculates the current virtual capital based on initial capital and PnL."""
     try:
-        conn = sqlite3.connect(DATABASE_FILE)
+        conn = sqlite3.connect(DATABASE_FILE, timeout=10) # Added timeout
         cursor = conn.cursor()
         net_pnl = cursor.execute("SELECT SUM(pnl_usdt) FROM trades WHERE status = 'Closed'").fetchone()[0] or 0
         conn.close()
@@ -663,7 +676,7 @@ async def perform_scan_and_trade(context: ContextTypes.DEFAULT_TYPE):
 
     settings = bot_state["settings"]
     try:
-        conn = sqlite3.connect(DATABASE_FILE)
+        conn = sqlite3.connect(DATABASE_FILE, timeout=10) # Added timeout
         cursor = conn.cursor()
         active_trades_count = cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'Active'").fetchone()[0]
         conn.close()
@@ -727,7 +740,7 @@ async def process_new_signal(bot, exchange: ccxt.Exchange, symbol: str, signal: 
         take_profit = entry_price * (1 + (sl_percent * settings["risk_reward_ratio"]) / 100)
 
     try:
-        conn = sqlite3.connect(DATABASE_FILE)
+        conn = sqlite3.connect(DATABASE_FILE, timeout=10) # Added timeout
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO trades (timestamp, exchange, symbol, strategy, entry_price, initial_stop_loss, current_stop_loss, take_profit, trade_value_usdt, status, highest_price)
@@ -766,7 +779,7 @@ async def track_active_trades(context: ContextTypes.DEFAULT_TYPE):
 
     settings = bot_state["settings"]
     try:
-        conn = sqlite3.connect(DATABASE_FILE)
+        conn = sqlite3.connect(DATABASE_FILE, timeout=10) # Added timeout
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         active_trades = cursor.execute("SELECT * FROM trades WHERE status = 'Active'").fetchall()
@@ -836,7 +849,7 @@ async def close_trade(bot, trade: Dict, exit_price: float, reason: str):
         logger.warning(f"Could not calculate duration for trade #{trade['id']}: {e}")
 
     try:
-        conn = sqlite3.connect(DATABASE_FILE)
+        conn = sqlite3.connect(DATABASE_FILE, timeout=10) # Added timeout
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE trades SET status = ?, exit_price = ?, closed_at = ?, pnl_usdt = ?, pnl_percent = ? WHERE id = ?
@@ -867,7 +880,7 @@ async def close_trade(bot, trade: Dict, exit_price: float, reason: str):
 async def update_trade_sl(bot, trade_id: int, new_sl: float, highest_price: float, is_activation: bool = False):
     """تحديث وقف الخسارة في قاعدة البيانات وإرسال إشعار."""
     try:
-        conn = sqlite3.connect(DATABASE_FILE)
+        conn = sqlite3.connect(DATABASE_FILE, timeout=10) # Added timeout
         cursor = conn.cursor()
         cursor.execute("UPDATE trades SET current_stop_loss = ?, highest_price = ?, trailing_sl_active = 1 WHERE id = ?", (new_sl, highest_price, trade_id))
         conn.commit()
@@ -885,7 +898,7 @@ async def update_trade_sl(bot, trade_id: int, new_sl: float, highest_price: floa
 async def update_trade_peak_price(trade_id: int, highest_price: float):
     """تحديث أعلى سعر وصلت إليه الصفقة فقط."""
     try:
-        conn = sqlite3.connect(DATABASE_FILE)
+        conn = sqlite3.connect(DATABASE_FILE, timeout=10) # Added timeout
         cursor = conn.cursor()
         cursor.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade_id))
         conn.commit()
@@ -1249,7 +1262,7 @@ async def run_pro_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def scan_for_new_listings() -> Dict[str, List[str]]:
     """Scans all exchanges and returns a dictionary of new listings."""
     logger.info("Scanning for new listings...")
-    conn = sqlite3.connect(DATABASE_FILE)
+    conn = sqlite3.connect(DATABASE_FILE, timeout=10) # Added timeout
     cursor = conn.cursor()
 
     cursor.execute("SELECT COUNT(*) FROM known_symbols")
@@ -1411,7 +1424,7 @@ async def toggle_tasks_command(update: Update, context: ContextTypes.DEFAULT_TYP
 async def performance_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """إنشاء وإرسال تقرير أداء شامل ومقسم على صفحات."""
     try:
-        conn = sqlite3.connect(DATABASE_FILE)
+        conn = sqlite3.connect(DATABASE_FILE, timeout=10) # Added timeout
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -1481,7 +1494,7 @@ async def active_trades_command(update: Update, context: ContextTypes.DEFAULT_TY
     """Fetches and displays all active trades, paginated."""
     await update.message.reply_text("📈 **الصفقات النشطة**\n\n🔍 جارِ جلب الصفقات الحالية...")
     try:
-        conn = sqlite3.connect(DATABASE_FILE)
+        conn = sqlite3.connect(DATABASE_FILE, timeout=10) # Added timeout
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         active_trades = cursor.execute("SELECT * FROM trades WHERE status = 'Active' ORDER BY id DESC").fetchall()
@@ -1588,7 +1601,7 @@ async def run_diagnostic_report(update: Update, context: ContextTypes.DEFAULT_TY
         report.append(f"- {ex_id}: `{status}`")
         
     try:
-        conn = sqlite3.connect(DATABASE_FILE)
+        conn = sqlite3.connect(DATABASE_FILE, timeout=10) # Added timeout
         cursor = conn.cursor()
         cache_count = cursor.execute("SELECT COUNT(*) FROM ohlcv_cache").fetchone()[0]
         known_symbols_count = cursor.execute("SELECT COUNT(*) FROM known_symbols").fetchone()[0]
@@ -1734,7 +1747,7 @@ async def send_periodic_summary(context: ContextTypes.DEFAULT_TYPE):
     if not bot_state["settings"].get("background_tasks_enabled", True): return
     
     try:
-        conn = sqlite3.connect(DATABASE_FILE)
+        conn = sqlite3.connect(DATABASE_FILE, timeout=10) # Added timeout
         active_trades_count = conn.cursor().execute("SELECT COUNT(*) FROM trades WHERE status = 'Active'").fetchone()[0]
         conn.close()
 
@@ -1775,10 +1788,11 @@ async def post_init(application: Application):
         logger.warning("JobQueue is not available. Automated scans will not run.")
         return
 
+    # DATABASE LOCK FIX: Stagger job start times to reduce concurrency
     job_queue.run_repeating(perform_scan_and_trade, interval=timedelta(minutes=SCAN_INTERVAL_MINUTES), first=10, name='main_scan')
-    job_queue.run_repeating(track_active_trades, interval=timedelta(minutes=TRACK_INTERVAL_MINUTES), first=20, name='trade_tracker')
-    job_queue.run_repeating(send_periodic_summary, interval=timedelta(hours=SUMMARY_INTERVAL_HOURS), first=60, name='periodic_summary')
-    job_queue.run_repeating(periodic_listings_check, interval=timedelta(minutes=LISTINGS_CHECK_INTERVAL_MINUTES), first=45, name='new_listings_checker')
+    job_queue.run_repeating(track_active_trades, interval=timedelta(minutes=TRACK_INTERVAL_MINUTES), first=60, name='trade_tracker') # Runs after 1 min
+    job_queue.run_repeating(send_periodic_summary, interval=timedelta(hours=SUMMARY_INTERVAL_HOURS), first=120, name='periodic_summary') # Runs after 2 mins
+    job_queue.run_repeating(periodic_listings_check, interval=timedelta(minutes=LISTINGS_CHECK_INTERVAL_MINUTES), first=300, name='new_listings_checker') # Runs after 5 mins
 
     await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v3.4 (تحديث النشر في القناة) متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
     logger.info("Bot is fully initialized and background jobs are scheduled.")
@@ -1834,4 +1848,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
