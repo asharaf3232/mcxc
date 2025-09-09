@@ -1390,41 +1390,72 @@ async def toggle_tasks_command(update: Update, context: ContextTypes.DEFAULT_TYP
     logger.info(f"Background tasks toggled {'ON' if new_status else 'OFF'} by user.")
 
 async def performance_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """إنشاء وإرسال تقرير أداء شامل."""
+    """إنشاء وإرسال تقرير أداء شامل ومقسم على صفحات."""
     try:
         conn = sqlite3.connect(DATABASE_FILE)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
         total_trades = cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'Closed'").fetchone()[0]
+        if total_trades == 0:
+            await update.message.reply_text("📊 لا توجد صفقات مغلقة لإنشاء تقرير أداء.")
+            conn.close()
+            return
+
         successful_trades = cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'Closed' and pnl_usdt > 0").fetchone()[0]
         total_pnl = cursor.execute("SELECT SUM(pnl_usdt) FROM trades WHERE status = 'Closed'").fetchone()[0] or 0
         win_rate = (successful_trades / total_trades * 100) if total_trades > 0 else 0
         virtual_capital = await get_virtual_capital()
 
-        report = [
+        # 1. Send the main summary first
+        summary_report = [
             f"📊 **تقرير الأداء الشامل** 📊\n",
             f"▪️ رأس المال الافتراضي الحالي: *${virtual_capital:,.2f}*",
             f"▪️ إجمالي الصفقات المغلقة: *{total_trades}*",
             f"▪️ نسبة النجاح: *{win_rate:.2f}%*",
-            f"▪️ صافي الربح/الخسارة: *${total_pnl:,.2f}*\n",
-            "--- **أداء الاستراتيجيات** ---"
+            f"▪️ صافي الربح/الخسارة: *${total_pnl:,.2f}*",
         ]
+        await update.message.reply_text("\n".join(summary_report), parse_mode=ParseMode.MARKDOWN)
+        await asyncio.sleep(0.5) # Small delay
 
-        strategy_stats = cursor.execute("SELECT strategy, COUNT(*), AVG(pnl_percent), SUM(pnl_usdt) FROM trades WHERE status = 'Closed' GROUP BY strategy").fetchall()
+        # 2. Fetch and prepare the strategy details for pagination
+        strategy_stats = cursor.execute(
+            "SELECT strategy, COUNT(*), AVG(pnl_percent), SUM(pnl_usdt) FROM trades WHERE status = 'Closed' GROUP BY strategy ORDER BY SUM(pnl_usdt) DESC"
+        ).fetchall()
         conn.close()
 
-        for stat in strategy_stats:
-            report.append(f"\n- `{stat['strategy']}`:")
-            report.append(f"  - عدد الصفقات: {stat['COUNT(*)']}")
-            report.append(f"  - متوسط الربح/الخسارة: {stat['AVG(pnl_percent)']:.2f}%")
-            report.append(f"  - صافي الربح/الخسارة: ${stat['SUM(pnl_usdt)']:.2f}")
+        if not strategy_stats:
+            return
 
-        await update.message.reply_text("\n".join(report), parse_mode=ParseMode.MARKDOWN)
+        all_strategy_lines = []
+        for stat in strategy_stats:
+            line = (
+                f"\n- `{stat['strategy']}`:\n"
+                f"  - عدد الصفقات: {stat['COUNT(*)']}\n"
+                f"  - متوسط الربح/الخسارة: {stat['AVG(pnl_percent)']:.2f}%\n"
+                f"  - صافي الربح/الخسارة: ${stat['SUM(pnl_usdt)']:.2f}"
+            )
+            all_strategy_lines.append(line)
+
+        # 3. Loop through the pages and send each one as a separate message
+        page_size = 7  # Number of strategies per message, adjust if needed
+        total_pages = math.ceil(len(all_strategy_lines) / page_size)
+
+        for page_num in range(total_pages):
+            start_index = page_num * page_size
+            end_index = start_index + page_size
+            page_lines = all_strategy_lines[start_index:end_index]
+            
+            header = f"--- **أداء الاستراتيجيات (صفحة {page_num + 1}/{total_pages})** ---"
+            message = header + "".join(page_lines)
+            
+            await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+            await asyncio.sleep(0.5) # Avoid hitting rate limits
 
     except Exception as e:
         await update.message.reply_text(f"حدث خطأ أثناء إنشاء التقرير: {e}")
-        logger.error(f"Error in performance_report_command: {e}")
+        logger.error(f"Error in performance_report_command: {e}", exc_info=True)
+
 
 @user_task_lock
 async def active_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1783,4 +1814,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
