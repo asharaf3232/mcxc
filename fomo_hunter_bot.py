@@ -1337,6 +1337,9 @@ async def manual_check_listings_command(update: Update, context: ContextTypes.DE
 # --- 🤖 10. أوامر التليجرام وواجهة المستخدم 🤖 ---
 # =============================================================================
 
+# تعريف النص كمتغير ثابت لضمان التطابق
+ADVANCED_SETTINGS_TEXT = "⚙️ الإعدادات المتقدمة"
+
 def build_main_menu() -> ReplyKeyboardMarkup:
     """Builds the main menu with a dynamic tasks toggle button."""
     tasks_enabled = bot_state["settings"].get("background_tasks_enabled", True)
@@ -1348,7 +1351,7 @@ def build_main_menu() -> ReplyKeyboardMarkup:
         ["📢 مراقبة الإدراجات", "📊 ملخص السوق"],
         ["📊 تقرير الأداء", "📈 الصفقات النشطة"],
         [toggle_button_text],
-        ["⚙️ الإعدادات", "⚙️ الإعدادات المتقدمة"],
+        ["⚙️ الإعدادات", ADVANCED_SETTINGS_TEXT],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -1820,7 +1823,7 @@ def main() -> None:
 
     # Conversation handler for advanced settings
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^⚙️ الإعدادات المتقدمة$'), advanced_settings_start)],
+        entry_points=[MessageHandler(filters.Regex(f'^{ADVANCED_SETTINGS_TEXT}$'), advanced_settings_start)],
         states={
             CHOOSING_SETTING: [CallbackQueryHandler(choose_setting_to_edit, pattern='^edit_'),
                                CallbackQueryHandler(end_settings_conversation, pattern='^exit_settings$')],
@@ -1848,3 +1851,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
