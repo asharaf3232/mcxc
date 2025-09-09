@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 # ======================================================================================================================
-# == Hybrid Hunter Bot v3.3 | Elite Upgrade ==========================================================================
+# == Hybrid Hunter Bot v3.4 | Channel Publishing Update ==============================================================
 # ======================================================================================================================
 #
-# v3.3 "الترقية إلى مستوى النخبة" Changelog:
-# - ENHANCEMENT: تم تحديث `get_master_trend` ليصبح أكثر ذكاءً.
-#   - يستخدم الآن تقاطع متوسطين متحركين (EMA 21 و SMA 50) بدلاً من متوسط واحد.
-#   - يدمج مؤشر الخوف والطمع (Fear & Greed Index) من مصدر خارجي للحصول على رؤية أوسع للسوق.
-# - NEW LIBRARY: تمت إضافة مكتبة `requests` لجلب بيانات مؤشر الخوف والطمع. تأكد من إضافتها إلى `requirements.txt`.
-# - MINOR FIX: تم تعديل وظيفة `find_support_resistance` لتكون أكثر استقراراً في حالة عدم وجود مستويات.
+# v3.4 "تحديث النشر في القناة" Changelog:
+# - NEW FEATURE: تمت إضافة القدرة على نشر جميع إشارات التداول (جديدة، مغلقة، تحديثات SL) في قناة تليجرام منفصلة.
+# - NEW CONFIG: تمت إضافة متغير بيئة جديد `TELEGRAM_CHANNEL_ID` لتحديد القناة المستهدفة.
+# - CODE REFACTOR: تم إنشاء دالة مساعدة `send_message_to_targets` لتبسيط إرسال الإشعارات إلى كل من المسؤول والقناة.
+# - ENHANCEMENT: تم تحديث تقرير التشخيص ليشمل حالة معرّف القناة.
 #
 # ======================================================================================================================
 
@@ -48,9 +47,10 @@ from telegram.ext import (
 # =============================================================================
 
 # --- إعدادات التليجرام والملفات ---
-# IMPORTANT: Make sure these are set as Environment Variables in your hosting platform (e.g., Railway)
+# IMPORTANT: Make sure these are set as Environment Variables in your hosting platform
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID')
+TELEGRAM_CHANNEL_ID = os.environ.get('TELEGRAM_CHANNEL_ID', None) # <--  الإضافة الجديدة هنا
 
 # The bot will create these files in the persistent storage volume
 DATABASE_FILE = "data/hybrid_hunter.db"
@@ -109,7 +109,6 @@ DEFAULT_SETTINGS = {
     "trade_size_percent": 2.0,
     "use_master_trend_filter": True,
     "master_trend_tf": "4h",
-    # master_trend_ma is now obsolete, replaced by EMA/SMA crossover logic
     "use_trailing_sl": True,
     "trailing_sl_activation_percent": 1.5,
     "trailing_sl_callback_percent": 1.0,
@@ -123,7 +122,7 @@ DEFAULT_SETTINGS = {
     "gem_min_rise_from_atl_percent": 50.0,
     "gem_listing_since_days": 365,
     "pro_scan_min_score": 5,
-    "fear_and_greed_threshold": 30, # New setting: Don't scan if F&G index is below this value
+    "fear_and_greed_threshold": 30,
 }
 
 # --- متغيرات الحالة العامة ---
@@ -140,7 +139,7 @@ api_semaphore = asyncio.Semaphore(10)
 CHOOSING_SETTING, TYPING_VALUE = range(2)
 
 # =============================================================================
-# ---  Decorator for Task Locking ---
+# ---  الدوال المساعدة والمزخرفات ---
 # =============================================================================
 def user_task_lock(func):
     """Decorator to prevent concurrent execution of user-initiated long tasks."""
@@ -155,6 +154,26 @@ def user_task_lock(func):
         finally:
             bot_state['user_task_in_progress'] = False
     return wrapper
+
+async def send_message_to_targets(bot, message: str, parse_mode: str = ParseMode.MARKDOWN):
+    """
+    يرسل رسالة إلى كل من مدير البوت وقناة النشر المحددة.
+    """
+    # Send to admin
+    try:
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=parse_mode)
+    except Exception as e:
+        logger.error(f"Failed to send message to admin chat ({TELEGRAM_CHAT_ID}): {e}")
+
+    # Send to channel if configured
+    if TELEGRAM_CHANNEL_ID:
+        try:
+            await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=message, parse_mode=parse_mode)
+        except Forbidden:
+            logger.error(f"Failed to send message to channel ({TELEGRAM_CHANNEL_ID}). Bot might not be an admin or was kicked.")
+        except Exception as e:
+            logger.error(f"Failed to send message to channel ({TELEGRAM_CHANNEL_ID}): {e}")
+
 
 # =============================================================================
 # --- 🗄️ 2. إدارة الإعدادات وقاعدة البيانات 🗄️ ---
@@ -734,7 +753,7 @@ async def process_new_signal(bot, exchange: ccxt.Exchange, symbol: str, signal: 
             f"💰 **حجم الصفقة:** `${trade_size_usdt:.2f}`\n\n"
             f"*ID: {trade_id}*"
         )
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+        await send_message_to_targets(bot, message) # <-- التعديل هنا
         logger.info(f"Successfully processed and sent signal for {symbol} (ID: {trade_id}) on {exchange_name_to_store}")
 
     except Exception as e:
@@ -839,7 +858,7 @@ async def close_trade(bot, trade: Dict, exit_price: float, reason: str):
             f"📉 **سعر الخروج:** `{format_price(exit_price)}`\n"
             f"💰 **الربح/الخسارة:** **`${pnl_usdt:+.2f}`** (`{pnl_percent:+.2f}%`)"
         )
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+        await send_message_to_targets(bot, message) # <-- التعديل هنا
         logger.info(f"Trade {trade['id']} ({trade['symbol']}) closed. Reason: {reason}. PnL: ${pnl_usdt:.2f}")
 
     except Exception as e:
@@ -856,7 +875,7 @@ async def update_trade_sl(bot, trade_id: int, new_sl: float, highest_price: floa
 
         if is_activation:
             message = f"🔒 **تأمين صفقة (ID: {trade_id})** 🔒\nتم نقل وقف الخسارة إلى نقطة الدخول: `{format_price(new_sl)}`"
-            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+            await send_message_to_targets(bot, message) # <-- التعديل هنا
             logger.info(f"Trailing SL activated for trade {trade_id}. New SL: {new_sl}")
         else:
              logger.info(f"Trailing SL updated for trade {trade_id}. New SL: {new_sl}")
@@ -1329,8 +1348,8 @@ settings_menu_keyboard = [
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر البدء."""
     welcome_message = (
-        "أهلاً بك في **بوت الصياد الهجين v3.3 (نسخة النخبة)**!\n\n"
-        "تم تحسين منطق تحليل اتجاه السوق العام لقرارات أكثر دقة."
+        "أهلاً بك في **بوت الصياد الهجين v3.4 (تحديث النشر في القناة)**!\n\n"
+        "تمت إضافة ميزة نشر التوصيات والنتائج في قناة منفصلة."
     )
     context.user_data.setdefault('active_manual_exchange', 'Binance')
     context.user_data.setdefault('next_step', None)
@@ -1544,6 +1563,7 @@ async def run_diagnostic_report(update: Update, context: ContextTypes.DEFAULT_TY
     settings = bot_state["settings"]
     report.append("--- **الإعدادات العامة** ---")
     report.append(f"- حالة المهام الخلفية: `{'🟢 تعمل' if settings.get('background_tasks_enabled') else '🔴 متوقفة'}`")
+    report.append(f"- قناة النشر: `{TELEGRAM_CHANNEL_ID if TELEGRAM_CHANNEL_ID else 'غير محددة'}`") # <-- التعديل هنا
     report.append(f"- النمط النشط: `{settings.get('active_preset_name', 'N/A')}`")
     report.append(f"- الماسحات النشطة: `{', '.join(settings.get('active_scanners', []))}`")
     report.append(f"- منصة التقارير اليدوية: `{context.user_data.get('active_manual_exchange', 'N/A')}`\n")
@@ -1760,7 +1780,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(send_periodic_summary, interval=timedelta(hours=SUMMARY_INTERVAL_HOURS), first=60, name='periodic_summary')
     job_queue.run_repeating(periodic_listings_check, interval=timedelta(minutes=LISTINGS_CHECK_INTERVAL_MINUTES), first=45, name='new_listings_checker')
 
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v3.3 (نسخة النخبة) متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ **بوت الصياد الهجين v3.4 (تحديث النشر في القناة) متصل وجاهز للعمل!**", parse_mode=ParseMode.MARKDOWN)
     logger.info("Bot is fully initialized and background jobs are scheduled.")
 
 async def post_shutdown(application: Application):
@@ -1809,8 +1829,9 @@ def main() -> None:
 
     application.add_error_handler(error_handler)
 
-    logger.info("Starting Hybrid Hunter Bot v3.3 (Elite Upgrade)...")
+    logger.info("Starting Hybrid Hunter Bot v3.4 (Channel Publishing Update)...")
     application.run_polling()
 
 if __name__ == '__main__':
     main()
+
