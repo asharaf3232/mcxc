@@ -2,6 +2,6 @@ python-telegram-bot[job-queue]>=21.0
 aiohttp
 numpy
 ccxt
-pandas
+pandas<2.2
 pandas-ta
 requests
